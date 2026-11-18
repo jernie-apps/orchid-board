@@ -23,6 +23,8 @@ export interface Config {
   mcpPort: number;
   /** Seconds between sync polls. */
   pollSeconds: number;
+  /** Minutes an MCP task claim lasts before another agent may take it. */
+  claimTtlMinutes: number;
   repos: RepoRef[];
   project: ProjectRef | null;
 }
@@ -31,7 +33,7 @@ export class ConfigError extends Error {
   override name = 'ConfigError';
 }
 
-const DEFAULTS = { port: 4310, mcpPort: 4311, pollSeconds: 60 } as const;
+const DEFAULTS = { port: 4310, mcpPort: 4311, pollSeconds: 60, claimTtlMinutes: 120 } as const;
 
 /** `$ORCHID_BOARD_HOME` when it is an absolute path, else `~/.orchid/board`. */
 export function boardHome(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
@@ -66,6 +68,7 @@ export function parseConfig(raw: unknown, home: string, file = 'config.json'): C
     port: port(raw.port ?? DEFAULTS.port, 'port', file),
     mcpPort: port(raw.mcpPort ?? DEFAULTS.mcpPort, 'mcpPort', file),
     pollSeconds: positiveInt(raw.pollSeconds ?? DEFAULTS.pollSeconds, 'pollSeconds', file),
+    claimTtlMinutes: positiveInt(raw.claimTtlMinutes ?? DEFAULTS.claimTtlMinutes, 'claimTtlMinutes', file),
     repos: repos(raw.repos, file),
     project: raw.project == null ? null : project(raw.project, file),
   };

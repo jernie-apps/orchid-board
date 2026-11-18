@@ -359,3 +359,38 @@ test('lastSyncAt tracks the oldest repo and stays put when a poll fails', async 
   assert.equal(poller.lastSyncAt, first);
   assert.deepEqual(synced, [first, first]);
 });
+
+test('pollNow polls only the named repos and repeats a poll that was already running', async t => {
+  const store = openStore(':memory:');
+  const calls: string[] = [];
+  let release!: () => void;
+  let gate: Promise<void> | null = new Promise<void>(resolve => { release = resolve; });
+  let polled!: () => void;
+  const done = new Promise<void>(resolve => { polled = resolve; });
+  const poller = new Poller({
+    store, pollSeconds: 60,
+    repos: [{ owner: 'companie-apps', name: 'orchid-board' }, { owner: 'companie-apps', name: 'other' }],
+    createClient: ({ name }) => ({
+      listIssues: async () => {
+        calls.push(name);
+        if (gate) await gate;
+        if (calls.length === 2) polled();
+        return [];
+      },
+      listIssuePullRequests: async () => new Map(),
+      listRepoPullRequests: async () => [],
+    }),
+  });
+  t.after(async () => {
+    await poller.stop();
+    store.close();
+  });
+
+  poller.pollNow(['Companie-Apps/Orchid-Board']);
+  poller.pollNow([REPO]);
+  assert.deepEqual(calls, ['orchid-board']);
+  gate = null;
+  release();
+  await done;
+  assert.deepEqual(calls, ['orchid-board', 'orchid-board']);
+});

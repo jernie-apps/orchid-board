@@ -34,13 +34,14 @@ describe('loadConfig', () => {
     const home = tempHome();
     writeFileSync(
       join(home, 'config.json'),
-      JSON.stringify({ port: 8080, mcpPort: 8081, pollSeconds: 30, repos: ['companie-apps/orchid-board'], project: { owner: 'companie-apps', number: 3 } }),
+      JSON.stringify({ port: 8080, mcpPort: 8081, pollSeconds: 30, claimTtlMinutes: 45, repos: ['companie-apps/orchid-board'], project: { owner: 'companie-apps', number: 3 } }),
     );
     assert.deepEqual(loadConfig(home), {
       home,
       port: 8080,
       mcpPort: 8081,
       pollSeconds: 30,
+      claimTtlMinutes: 45,
       repos: [{ owner: 'companie-apps', name: 'orchid-board' }],
       project: { owner: 'companie-apps', number: 3 },
     });
@@ -53,6 +54,7 @@ describe('loadConfig', () => {
     assert.equal(config.port, 4310);
     assert.equal(config.mcpPort, 4311);
     assert.equal(config.pollSeconds, 60);
+    assert.equal(config.claimTtlMinutes, 120);
     assert.equal(config.project, null);
   });
 
