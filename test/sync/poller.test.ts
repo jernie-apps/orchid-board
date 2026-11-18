@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import type { ProjectRef, RepoRef } from '../../src/config.ts';
 import { GitHubError } from '../../src/github/client.ts';
-import type { Issue, PullRequest } from '../../src/github/types.ts';
+import type { Issue, PullRequest, RepoPullRequest } from '../../src/github/types.ts';
 import { openStore } from '../../src/store/store.ts';
 import { Poller } from '../../src/sync/poller.ts';
 import type { SyncChange } from '../../src/sync/mirror.ts';
@@ -12,6 +12,7 @@ const OTHER = 'companie-apps/other';
 const PR_REF = 'companie-apps/tools#21';
 const INITIAL = '2026-11-18T00:00:00Z';
 const UPDATED = '2026-11-18T00:01:00Z';
+const EDITED = '2026-11-18T00:02:00Z';
 const PROJECT = { owner: 'companie-apps', number: 7 };
 
 function issue(number: number, overrides: Partial<Issue> = {}): Issue {
@@ -31,14 +32,23 @@ function pr(overrides: Partial<PullRequest> = {}): PullRequest {
   };
 }
 
+function repoPr(number: number, overrides: Partial<RepoPullRequest> = {}): RepoPullRequest {
+  return {
+    ...pr({ number, url: `https://github.com/${REPO}/pull/${number}` }),
+    baseRefName: 'feature/core/core', bodyIssueRefs: [], githubIssueRefs: [], ...overrides,
+  };
+}
+
 function fixture(t: TestContext, repos: RepoRef[] = [{ owner: 'COMPANIE-APPS', name: 'Orchid-Board' }]) {
   const store = openStore(':memory:');
   const changes: SyncChange[] = [];
   const errors: [string, unknown][] = [];
   const calls: { repo: string; since: string | null; project: ProjectRef | null }[] = [];
   const refreshes: [string, readonly string[]][] = [];
+  const prCalls: [string, string | null][] = [];
   const remoteIssues = new Map<string, readonly Issue[] | Error>();
   const remotePrs = new Map<string, readonly PullRequest[]>();
+  const remoteRepoPrs = new Map<string, readonly RepoPullRequest[] | Error>();
   let now = Date.parse(INITIAL);
   const poller = new Poller({
     store, repos, project: PROJECT, pollSeconds: 60,
@@ -57,6 +67,12 @@ function fixture(t: TestContext, repos: RepoRef[] = [{ owner: 'COMPANIE-APPS', n
           refreshes.push([repo, ids]);
           return new Map(ids.map(id => [id, remotePrs.get(id) ?? []]));
         },
+        listRepoPullRequests: async since => {
+          prCalls.push([repo, since]);
+          const result = remoteRepoPrs.get(repo) ?? [];
+          if (result instanceof Error) throw result;
+          return result;
+        },
       };
     },
   });
@@ -65,7 +81,10 @@ function fixture(t: TestContext, repos: RepoRef[] = [{ owner: 'COMPANIE-APPS', n
     await poller.stop();
     store.close();
   });
-  return { store, poller, changes, errors, calls, refreshes, remoteIssues, remotePrs, advance: (ms: number) => { now += ms; } };
+  return {
+    store, poller, changes, errors, calls, refreshes, prCalls, remoteIssues, remotePrs, remoteRepoPrs,
+    advance: (ms: number) => { now += ms; },
+  };
 }
 
 test('full startup replaces stale repo cache and keeps the store hierarchy and orphans', async t => {
@@ -151,6 +170,52 @@ test('a PR keeps links across a partial update and across configured repositorie
   assert.deepEqual(changes, [{ repo: REPO, issues: [first.ref, second.ref, third.ref], prs: [PR_REF] }]);
 });
 
+test('body links update across repos and coexist with GitHub closing refs', async t => {
+  const { store, poller, changes, prCalls, remoteIssues, remotePrs, remoteRepoPrs } = fixture(t, [
+    { owner: 'companie-apps', name: 'orchid-board' }, { owner: 'companie-apps', name: 'other' },
+  ]);
+  const task = issue(6);
+  const other = issue(2, { ref: 'companie-apps/Other#2' });
+  const historical = repoPr(24, { state: 'merged', updatedAt: INITIAL, bodyIssueRefs: [task.ref] });
+  const feature = repoPr(22, { updatedAt: INITIAL, bodyIssueRefs: [task.ref, `${OTHER}#2`] });
+  const defaultBranch = repoPr(23, { baseRefName: 'main', bodyIssueRefs: [task.ref], githubIssueRefs: [task.ref] });
+  remoteIssues.set(REPO, [{ ...task, pullRequests: [defaultBranch] }]);
+  remoteIssues.set(OTHER, [other]);
+  remoteRepoPrs.set(REPO, [feature, defaultBranch, historical]);
+  await poller.pollOnce();
+
+  assert.deepEqual(store.getPr(`${REPO}#22`)?.issues, [other.ref, task.ref]);
+  assert.deepEqual(store.prsForIssue(other.ref).map(pr => pr.number), [22]);
+  assert.deepEqual(store.prsForIssue(task.ref).map(pr => pr.number), [22, 23, 24]);
+  assert.equal(store.getMeta(`sync:since:${REPO}`), INITIAL);
+  assert.equal(store.getMeta(`sync:prs:since:${REPO}`), UPDATED);
+
+  changes.length = 0;
+  remoteIssues.set(REPO, []);
+  remoteIssues.set(OTHER, []);
+  remotePrs.set(task.nodeId, [defaultBranch]);
+  remoteRepoPrs.set(REPO, [{ ...feature, checkStatus: 'pass' }, defaultBranch]);
+  await poller.pollOnce();
+
+  assert.equal(store.getPr(`${REPO}#22`)?.checks, 'pass');
+  assert.deepEqual(store.prsForIssue(task.ref).map(pr => pr.number), [22, 23, 24]);
+  assert.deepEqual(changes, [{ repo: REPO, issues: [other.ref, task.ref], prs: [`${REPO}#22`] }]);
+
+  changes.length = 0;
+  remoteRepoPrs.set(REPO, [
+    { ...feature, state: 'closed', updatedAt: EDITED, bodyIssueRefs: [] },
+    { ...defaultBranch, bodyIssueRefs: [] },
+  ]);
+  await poller.pollOnce();
+
+  assert.equal(store.getPr(`${REPO}#22`), null);
+  assert.deepEqual(store.prsForIssue(other.ref), []);
+  assert.deepEqual(store.prsForIssue(task.ref).map(pr => pr.number), [23, 24]);
+  assert.deepEqual(changes, [{ repo: REPO, issues: [other.ref, task.ref], prs: [`${REPO}#22`] }]);
+  assert.deepEqual(prCalls.filter(([repo]) => repo === REPO), [[REPO, null], [REPO, UPDATED], [REPO, UPDATED]]);
+  assert.equal(store.getMeta(`sync:prs:since:${REPO}`), EDITED);
+});
+
 test('transfers remove old refs and stale pull request links and report both issue refs', async t => {
   const { store, poller, changes, remoteIssues } = fixture(t);
   const incoming = issue(1);
@@ -171,11 +236,13 @@ test('transfers remove old refs and stale pull request links and report both iss
 });
 
 test('a failed poll retries that repo without advancing the cursor or publishing partial writes', async t => {
-  const { store, poller, errors, changes, calls, remoteIssues } = fixture(t);
+  const { store, poller, errors, changes, calls, prCalls, remoteIssues, remoteRepoPrs } = fixture(t);
   const task = issue(1, { pullRequests: [pr({ url: 'https://example.com/pull/21' })] });
   remoteIssues.set(REPO, [task]);
+  remoteRepoPrs.set(REPO, [repoPr(22)]);
   await poller.pollOnce();
   assert.equal(store.getMeta(`sync:since:${REPO}`), null);
+  assert.equal(store.getMeta(`sync:prs:since:${REPO}`), null);
   assert.equal(store.getIssue(task.ref), null);
   assert.deepEqual(changes, []);
   assert.match(String(errors[0]?.[1]), /invalid pull request URL/);
@@ -183,8 +250,10 @@ test('a failed poll retries that repo without advancing the cursor or publishing
   remoteIssues.set(REPO, [{ ...task, pullRequests: [pr()] }]);
   await poller.pollOnce();
   assert.deepEqual(calls.map(call => call.since), [null, null]);
+  assert.deepEqual(prCalls, [[REPO, null], [REPO, null]]);
   assert.equal(store.getIssue(task.ref)?.ref, task.ref);
   assert.equal(store.getMeta(`sync:since:${REPO}`), INITIAL);
+  assert.equal(store.getMeta(`sync:prs:since:${REPO}`), UPDATED);
   assert.equal(changes.length, 1);
 });
 
@@ -232,6 +301,7 @@ test('slow repos do not overlap or hold up another repo, and stop aborts in-flig
         return [];
       },
       listIssuePullRequests: async () => new Map(),
+      listRepoPullRequests: async () => [],
     }),
   });
   t.after(async () => {

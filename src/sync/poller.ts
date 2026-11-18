@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import type { ProjectRef, RepoRef } from '../config.ts';
 import { GitHubClient, GitHubError } from '../github/client.ts';
-import { listIssuePullRequests, listIssues } from '../github/queries.ts';
-import type { Issue, PullRequest } from '../github/types.ts';
+import { listIssuePullRequests, listIssues, listRepoPullRequests } from '../github/queries.ts';
+import type { Issue, PullRequest, RepoPullRequest } from '../github/types.ts';
 import type { Secret } from '../secrets.ts';
 import type { Store } from '../store/store.ts';
 import { mirrorRepo, type SyncChange } from './mirror.ts';
@@ -10,6 +10,7 @@ import { mirrorRepo, type SyncChange } from './mirror.ts';
 interface SyncClient {
   listIssues(options: { since: string | null; project: ProjectRef | null }): Promise<readonly Issue[]>;
   listIssuePullRequests(nodeIds: readonly string[]): Promise<ReadonlyMap<string, readonly PullRequest[]>>;
+  listRepoPullRequests(since: string | null): Promise<readonly RepoPullRequest[]>;
 }
 
 interface PollerOptions {
@@ -25,6 +26,7 @@ interface PollerOptions {
 interface RepoPoll {
   name: string;
   cursorKey: string;
+  prCursorKey: string;
   client: SyncClient;
   full: boolean;
   retryAt: number;
@@ -39,6 +41,7 @@ export function createGitHubPoller({ token, ...options }: Omit<PollerOptions, 'c
       return {
         listIssues: options => listIssues(client, repo, options),
         listIssuePullRequests: nodeIds => listIssuePullRequests(client, nodeIds),
+        listRepoPullRequests: since => listRepoPullRequests(client, repo, since),
       };
     },
   });
@@ -61,6 +64,7 @@ export class Poller {
       this.#repos.set(name, {
         name,
         cursorKey: `sync:since:${name}`,
+        prCursorKey: `sync:prs:since:${name}`,
         client: options.createClient(repo, this.#stop.signal),
         full: true,
         retryAt: 0,
@@ -111,8 +115,14 @@ export class Poller {
         if (remaining.length) refreshedPrs = await repo.client.listIssuePullRequests(remaining);
       }
       if (this.#stop.signal.aborted) return;
+      const prSince = repo.full ? null : store.getMeta(repo.prCursorKey);
+      const prs = await repo.client.listRepoPullRequests(prSince);
+      if (this.#stop.signal.aborted) return;
 
-      const change = mirrorRepo(store, repo.name, repo.cursorKey, since, issues, refreshedPrs);
+      const change = mirrorRepo(store, {
+        repo: repo.name, cursorKey: repo.cursorKey, since, issues, refreshedPrs,
+        prCursorKey: repo.prCursorKey, prSince, prs,
+      });
       repo.full = false;
       if (change.issues.length || change.prs.length) this.events.emit('change', change);
     } catch (error) {
