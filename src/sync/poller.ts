@@ -7,6 +7,9 @@ import type { Secret } from '../secrets.ts';
 import type { Store } from '../store/store.ts';
 import { mirrorRepo, type SyncChange } from './mirror.ts';
 
+/** `change`: a repo poll wrote new data. `synced`: a repo poll succeeded; carries `Poller#lastSyncAt`. */
+export type SyncEvents = { change: [SyncChange]; synced: [number] };
+
 interface SyncClient {
   listIssues(options: { since: string | null; project: ProjectRef | null }): Promise<readonly Issue[]>;
   listIssuePullRequests(nodeIds: readonly string[]): Promise<ReadonlyMap<string, readonly PullRequest[]>>;
@@ -30,6 +33,8 @@ interface RepoPoll {
   client: SyncClient;
   full: boolean;
   retryAt: number;
+  /** Epoch ms of the last successful poll, or null before the first. */
+  syncedAt: number | null;
   active?: Promise<void>;
   /** Poll again as soon as the active poll ends. */
   again?: boolean;
@@ -50,7 +55,7 @@ export function createGitHubPoller({ token, ...options }: Omit<PollerOptions, 'c
 }
 
 export class Poller {
-  readonly events = new EventEmitter<{ change: [SyncChange] }>();
+  readonly events = new EventEmitter<SyncEvents>();
   readonly #options: PollerOptions;
   readonly #repos = new Map<string, RepoPoll>();
   readonly #stop = new AbortController();
@@ -70,8 +75,19 @@ export class Poller {
         client: options.createClient(repo, this.#stop.signal),
         full: true,
         retryAt: 0,
+        syncedAt: null,
       });
     }
+  }
+
+  /** Epoch ms of the oldest repo's last successful poll; null until every repo has synced once. */
+  get lastSyncAt(): number | null {
+    let oldest: number | null = null;
+    for (const repo of this.#repos.values()) {
+      if (repo.syncedAt === null) return null;
+      if (oldest === null || repo.syncedAt < oldest) oldest = repo.syncedAt;
+    }
+    return oldest;
   }
 
   start(): void {
@@ -148,7 +164,10 @@ export class Poller {
         prCursorKey: repo.prCursorKey, prSince, prs,
       });
       repo.full = false;
+      repo.syncedAt = this.#now();
       if (change.issues.length || change.prs.length) this.events.emit('change', change);
+      const lastSyncAt = this.lastSyncAt;
+      if (lastSyncAt !== null) this.events.emit('synced', lastSyncAt);
     } catch (error) {
       if (this.#stop.signal.aborted) return;
       if (error instanceof GitHubError && error.retryAfterMs !== undefined) {

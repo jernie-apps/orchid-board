@@ -7,6 +7,7 @@ import { hasSecret, readSecret, redact, SecretError, type SecretName } from './s
 import { dbPath } from './store/db.ts';
 import { openStore } from './store/store.ts';
 import { createGitHubPoller } from './sync/poller.ts';
+import { startWebServer, type WebServer } from './web/server.ts';
 
 const OPTIONAL_SECRETS: readonly SecretName[] = ['web.passphrase'];
 
@@ -66,6 +67,14 @@ async function main(): Promise<void> {
   };
   console.log(JSON.stringify({ msg: 'orchid-board starting', config, secrets: present, mcp: mcp.url }));
 
+  let web: WebServer | null = null;
+  if (hasSecret(home, 'web.passphrase')) {
+    web = await startWebServer({ store, sync: poller, passphrase: readSecret(home, 'web.passphrase'), port: config.port, mcpPort: config.mcpPort });
+    console.log(JSON.stringify({ msg: 'web board listening', url: `http://127.0.0.1:${web.port}` }));
+  } else {
+    console.error(`orchid-board: web board disabled: missing or unreadable ${home}/web.passphrase`);
+  }
+
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -74,6 +83,7 @@ async function main(): Promise<void> {
     writeAbort.abort();
     await writer.stop();
     await poller.stop();
+    await web?.close();
     store.close();
   };
   process.on('SIGINT', shutdown);

@@ -334,6 +334,32 @@ test('incremental PR refresh skips closed issues that GitHub did not return', as
   assert.deepEqual(refreshes, [[REPO, [open.nodeId]]]);
 });
 
+test('lastSyncAt tracks the oldest repo and stays put when a poll fails', async t => {
+  const { poller, remoteIssues, advance } = fixture(t, [{ owner: 'companie-apps', name: 'orchid-board' }, { owner: 'companie-apps', name: 'other' }]);
+  const synced: number[] = [];
+  poller.events.on('synced', at => synced.push(at));
+  remoteIssues.set(OTHER, new Error('down'));
+  await poller.pollOnce();
+  // One repo has synced, the other has not: no sync time yet.
+  assert.equal(poller.lastSyncAt, null);
+  assert.deepEqual(synced, []);
+
+  advance(60_000);
+  remoteIssues.set(OTHER, []);
+  await poller.pollOnce();
+  const first = Date.parse(INITIAL) + 60_000;
+  assert.equal(poller.lastSyncAt, first);
+  // Emitted once every repo has synced: not for orchid-board alone, then for the other repo.
+  assert.deepEqual(synced, [first]);
+
+  advance(60_000);
+  remoteIssues.set(OTHER, new Error('down'));
+  await poller.pollOnce();
+  // orchid-board moved on; the failed repo holds the oldest successful poll.
+  assert.equal(poller.lastSyncAt, first);
+  assert.deepEqual(synced, [first, first]);
+});
+
 test('pollNow polls only the named repos and repeats a poll that was already running', async t => {
   const store = openStore(':memory:');
   const calls: string[] = [];
