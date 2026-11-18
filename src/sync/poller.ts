@@ -101,9 +101,12 @@ export class Poller {
       if (this.#stop.signal.aborted) return;
       let refreshedPrs: ReadonlyMap<string, readonly PullRequest[]> = new Map();
       if (since !== null) {
+        // PR/CI changes don't bump an issue's updatedAt, so re-check unchanged issues.
+        // Open issues only: closing an issue bumps updatedAt, and refreshing every closed
+        // issue each poll would burn the GraphQL budget across many repos.
         const returned = new Set(issues.map(issue => issue.nodeId));
         const remaining = store.listIssues()
-          .filter(issue => issue.repo.toLowerCase() === repo.name && !returned.has(issue.nodeId))
+          .filter(issue => issue.repo.toLowerCase() === repo.name && issue.state === 'open' && !returned.has(issue.nodeId))
           .map(issue => issue.nodeId);
         if (remaining.length) refreshedPrs = await repo.client.listIssuePullRequests(remaining);
       }

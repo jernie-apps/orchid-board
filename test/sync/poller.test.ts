@@ -250,3 +250,16 @@ test('slow repos do not overlap or hold up another repo, and stop aborts in-flig
   assert.equal(store.getIssue(`${REPO}#3`), null);
   assert.ok(store.getMeta(`sync:since:${OTHER}`));
 });
+
+test('incremental PR refresh skips closed issues that GitHub did not return', async t => {
+  const { poller, refreshes, remoteIssues } = fixture(t);
+  const open = issue(1);
+  const closed = issue(2, { state: 'closed' });
+  remoteIssues.set(REPO, [open, closed]);
+  await poller.pollOnce();
+
+  remoteIssues.set(REPO, []);
+  await poller.pollOnce();
+
+  assert.deepEqual(refreshes, [[REPO, [open.nodeId]]]);
+});
