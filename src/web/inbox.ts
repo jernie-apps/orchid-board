@@ -292,6 +292,8 @@ function renderRows(view: InboxView, proposal: Proposal, editable: boolean): str
       action = `<button class="icon-b" type="submit" name="op" value="${esc(`restore:${node.key}`)}" aria-label="${esc(`Restore ${node.title}`)}">${RESTORE_ICON}</button>`;
     } else if (editable && !isDropped && (node.status === 'draft' || node.status === 'sent_back')) {
       action = `<button class="icon-b" type="submit" name="op" value="${esc(`drop:${node.key}`)}" aria-label="${esc(`Drop ${node.title}`)}">${DROP_ICON}</button>`;
+    } else if (editable) {
+      action = '<span class="icon-sp"></span>';
     }
     return [
       `<div class="${classes}" data-i="${index}" data-anc="${ancestors.join(' ')}"${approve.has(node.key) ? ' data-ok' : ''}>`,

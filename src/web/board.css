@@ -192,6 +192,7 @@ a.brand:hover { color: var(--ink); }
 .ib-intro p { margin: 4px 0 0; font-size: 13px; line-height: 18px; }
 .code-box { display: flex; align-items: center; gap: 12px; margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--bg-sunken); }
 .code { font: 600 17px/22px var(--mono); letter-spacing: .08em; color: var(--ink); user-select: all; }
+.code-box > div:first-child { flex: none; }
 .code-note { max-width: 190px; }
 .ib-msg { margin: 16px 20px 0; padding: 10px 14px; border-radius: 8px; }
 .ib-msg.err { background: var(--failed-tint); color: var(--failed); font-weight: 500; }
@@ -222,6 +223,7 @@ a.brand:hover { color: var(--ink); }
 .tag { font-size: 11px; line-height: 14px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: var(--waiting-tint); color: var(--waiting); white-space: nowrap; }
 .icon-b { width: 28px; height: 28px; border: 0; background: transparent; border-radius: 6px; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0; }
 .icon-b:hover { background: var(--bg-hover); }
+.icon-sp { width: 28px; flex: none; }
 .ib-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border-subtle); background: var(--bg-content); }
 .ib-foot .btn { height: 28px; padding: 0 14px; font-size: 13px; }
 .scrim { position: fixed; inset: 0; z-index: 10; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -300,7 +302,7 @@ a.brand:hover { color: var(--ink); }
   .node.d1 { padding-left: 28px; } .node.d2 { padding-left: 40px; }
   .ti { min-width: 0; flex: 1 1 140px; height: 36px; font-size: 15px; }
   .cb { width: 20px; height: 20px; }
-  .icon-b { width: 40px; height: 40px; }
+  .icon-b, .icon-sp { width: 40px; height: 40px; }
   .ib-foot { padding: 12px 16px; }
   .ib-foot > .meta { flex-basis: 100%; }
   .ib-foot .grow { display: none; }
