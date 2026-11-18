@@ -144,7 +144,7 @@ test('wrong passphrase is refused; the right one sets a hardened session cookie'
   assert.equal(ok.headers.get('location'), '/');
   const cookie = ok.headers.get('set-cookie') ?? '';
   assert.match(cookie, /^orchid_session=[A-Za-z0-9_-]{43};/);
-  assert.match(cookie, /orchid_login=; Path=\/login; Max-Age=0/);
+  assert.match(cookie, /__Host-orchid_login=; Path=\/; Max-Age=0/);
   for (const flag of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(cookie.includes(flag), flag);
 
   const page = await request('/', { headers: { cookie: cookie.split(';')[0]! } });
@@ -173,7 +173,7 @@ test('the pre-session login form is CSRF protected by a cookie-bound token', asy
   const { request, loginForm } = await fixture(t);
   const page = await request('/login');
   const set = page.headers.get('set-cookie') ?? '';
-  assert.match(set, /^orchid_login=[A-Za-z0-9_-]{43}; Path=\/login; Max-Age=3600; HttpOnly; Secure; SameSite=Strict$/);
+  assert.match(set, /^__Host-orchid_login=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=3600; HttpOnly; Secure; SameSite=Strict$/);
   const post = (fields: Record<string, string>, cookie?: string, headers: Record<string, string> = {}) =>
     request('/login', {
       method: 'POST',
@@ -188,6 +188,7 @@ test('the pre-session login form is CSRF protected by a cookie-bound token', asy
     await post({ passphrase: PASSPHRASE }, jar),                             // cookie without the token
     await post({ passphrase: PASSPHRASE, csrf: other.token }, jar),          // another form's token
     await post({ passphrase: PASSPHRASE, csrf: token }, jar, { 'sec-fetch-site': 'cross-site' }),
+    await post({ passphrase: PASSPHRASE, csrf: token }, jar, { 'sec-fetch-site': 'same-site' }),  // sibling subdomain
   ];
   for (const res of refused) {
     assert.equal(res.status, 403);
@@ -296,7 +297,7 @@ test('inbox lists pending proposals and escapes agent text', async t => {
 });
 
 test('POSTs without the session CSRF token are refused and change nothing', async t => {
-  const { store, authed } = await fixture(t);
+  const { store, authed, request } = await fixture(t);
   const id = propose(store).id;
   const { post } = await authed();
   for (const csrf of [null, 'forged']) {
@@ -310,6 +311,15 @@ test('POSTs without the session CSRF token are refused and change nothing', asyn
   const other = await authed();
   const mine = await authed();
   assert.equal((await mine.post(`/inbox/${id}`, [['csrf', other.csrf], ['op', 'drop:t1']])).status, 403);
+  // A valid token from another site or a sibling subdomain is refused too.
+  for (const site of ['cross-site', 'same-site']) {
+    const res = await request(`/inbox/${id}`, {
+      method: 'POST',
+      headers: { cookie: mine.cookie, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': site },
+      body: new URLSearchParams([['csrf', mine.csrf], ['op', 'drop:t1']]).toString(),
+    });
+    assert.equal(res.status, 403, site);
+  }
   const proposal = store.getProposal(id)!;
   assert.equal(proposal.nodes.find(n => n.key === 't1')!.title, 'dark-theme');
   assert.equal(proposal.state, 'pending');
