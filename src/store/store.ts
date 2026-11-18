@@ -299,9 +299,13 @@ export class Store {
 
   // ---- PRs and checks ----
 
-  upsertPr(input: PrInput): void {
+  /** Write reported GitHub links and any additional links from the PR body. */
+  upsertPr(input: PrInput, bodyIssues: readonly string[] = []): void {
     const { repo, number } = parseRef(input.ref);
-    for (const issue of input.issues) if (!isRef(issue)) throw new StoreError(`invalid issue ref "${issue}"`);
+    const github = new Set(input.issues);
+    const body = new Set(bodyIssues);
+    const issues = new Set([...github, ...body]);
+    for (const issue of issues) if (!isRef(issue)) throw new StoreError(`invalid issue ref "${issue}"`);
     tx(this.db, () => {
       this.db
         .prepare(
@@ -311,8 +315,11 @@ export class Store {
         )
         .run(repo, number, input.url, input.title, input.state, input.draft ? 1 : 0, input.updatedAt);
       this.db.prepare('DELETE FROM pr_issues WHERE pr_repo = ? AND pr_number = ?').run(repo, number);
-      const link = this.db.prepare('INSERT OR IGNORE INTO pr_issues (pr_repo, pr_number, issue) VALUES (?, ?, ?)');
-      for (const issue of input.issues) link.run(repo, number, issue);
+      const link = this.db.prepare('INSERT INTO pr_issues (pr_repo, pr_number, issue, source) VALUES (?, ?, ?, ?)');
+      for (const issue of issues) {
+        const source = github.has(issue) ? (body.has(issue) ? 'both' : 'github') : 'body';
+        link.run(repo, number, issue, source);
+      }
       if (input.checks) this.setChecks(input.ref, input.checks);
     });
   }
@@ -354,16 +361,22 @@ export class Store {
   }
 
   listPrs(): Pr[] {
-    const links = new Map<string, string[]>();
+    return this.listPrsWithLinks().map(({ pr }) => pr);
+  }
+
+  listPrsWithLinks(): { pr: Pr; githubIssues: string[]; bodyIssues: string[] }[] {
+    const links = new Map<string, { issues: string[]; githubIssues: string[]; bodyIssues: string[] }>();
     const linkRows = this.db
-      .prepare('SELECT pr_repo, pr_number, issue FROM pr_issues ORDER BY issue')
+      .prepare('SELECT pr_repo, pr_number, issue, source FROM pr_issues ORDER BY issue')
       .all();
     for (const row of linkRows) {
       const ref = formatRef(String(row.pr_repo), Number(row.pr_number));
-      const issues = links.get(ref);
+      const group = links.get(ref) ?? { issues: [], githubIssues: [], bodyIssues: [] };
       const issue = String(row.issue);
-      if (issues) issues.push(issue);
-      else links.set(ref, [issue]);
+      group.issues.push(issue);
+      if (row.source !== 'body') group.githubIssues.push(issue);
+      if (row.source !== 'github') group.bodyIssues.push(issue);
+      links.set(ref, group);
     }
     const rows = this.db
       .prepare(
@@ -372,7 +385,10 @@ export class Store {
          ORDER BY p.repo, p.number`,
       )
       .all();
-    return rows.map(row => toPr(row, links.get(formatRef(String(row.repo), Number(row.number))) ?? []));
+    return rows.map(row => {
+      const { issues = [], githubIssues = [], bodyIssues = [] } = links.get(formatRef(String(row.repo), Number(row.number))) ?? {};
+      return { pr: toPr(row, issues), githubIssues, bodyIssues };
+    });
   }
 
   #prsByIssue(): Map<string, Pr[]> {

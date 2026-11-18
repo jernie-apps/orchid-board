@@ -40,6 +40,21 @@ describe('migrations', () => {
     assert.equal(schemaVersion(db), SCHEMA_VERSION);
   });
 
+  it('keeps existing PR links as GitHub links when upgrading from v1', () => {
+    const db = openDb(':memory:');
+    db.exec(`
+      ALTER TABLE pr_issues DROP COLUMN source;
+      UPDATE meta SET value = '1' WHERE key = 'schema_version';
+      INSERT INTO prs (repo, number, url, title, state, draft, updated_at)
+      VALUES ('org/repo', 10, 'https://github.com/org/repo/pull/10', 'A PR', 'open', 0, '2026-11-18T00:00:00Z');
+      INSERT INTO pr_issues (pr_repo, pr_number, issue) VALUES ('org/repo', 10, 'org/repo#5');
+    `);
+    assert.equal(migrate(db), SCHEMA_VERSION);
+    const link = db.prepare('SELECT issue, source FROM pr_issues').get();
+    assert.deepEqual({ ...link }, { issue: 'org/repo#5', source: 'github' });
+    db.close();
+  });
+
   it('refuses a db from a newer build', () => {
     const db = openDb(':memory:');
     db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION + 1));

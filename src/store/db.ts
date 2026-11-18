@@ -100,6 +100,10 @@ const MIGRATIONS: readonly string[] = [
     used_at TEXT
   );
   `,
+  `
+  ALTER TABLE pr_issues ADD COLUMN source TEXT NOT NULL DEFAULT 'github'
+    CHECK (source IN ('github', 'body', 'both'));
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

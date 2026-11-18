@@ -17,6 +17,12 @@ export interface PullRequest {
   checkStatus: CheckStatus;
 }
 
+export interface RepoPullRequest extends PullRequest {
+  baseRefName: string;
+  bodyIssueRefs: IssueRef[];
+  githubIssueRefs: IssueRef[];
+}
+
 export interface Issue {
   ref: IssueRef;
   number: number;
