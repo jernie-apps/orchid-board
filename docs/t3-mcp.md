@@ -16,17 +16,11 @@ Create the token once. It must be mode 0600:
 umask 077 && openssl rand -hex 32 > ~/.orchid/board/mcp.token
 ```
 
-Never paste the token into a config file. Both clients below read it from the `ORCHID_MCP_TOKEN` environment variable. Export that variable from the file in your shell profile (`~/.zshrc`):
-
-```sh
-export ORCHID_MCP_TOKEN="$(cat ~/.orchid/board/mcp.token)"
-```
-
-T3 must inherit the variable. If T3 was already running, restart it from a new shell. Do not use `claude mcp add --header "Authorization: Bearer $(cat ...)"`: the shell expands the token, and Claude stores the result inline in `~/.claude.json`.
+Never paste the token into a config file. Claude reads it from the file when it connects. Codex reads it from an environment variable.
 
 ## Claude (Claude Code)
 
-Add this to `.mcp.json` in the project, or under `mcpServers` in `~/.claude.json` for all projects. Claude expands `${ORCHID_MCP_TOKEN}` when it connects:
+Add the server at user scope, under `mcpServers` in `~/.claude.json`. T3 agents then get it in every repo and worktree. `headersHelper` runs when Claude connects and must print a JSON object of headers, so the token stays in its file:
 
 ```json
 {
@@ -34,15 +28,25 @@ Add this to `.mcp.json` in the project, or under `mcpServers` in `~/.claude.json
     "orchid": {
       "type": "http",
       "url": "http://127.0.0.1:4311/mcp",
-      "headers": { "Authorization": "Bearer ${ORCHID_MCP_TOKEN}" }
+      "headersHelper": "printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat ~/.orchid/board/mcp.token)\""
     }
   }
 }
 ```
 
+Another way is `"headers": { "Authorization": "Bearer ${ORCHID_MCP_TOKEN}" }`, with the variable exported as shown for Codex below. Claude expands `${VAR}` when it connects. Do not use `claude mcp add --header "Authorization: Bearer $(cat ...)"`: the shell expands the token, and Claude stores the result inline in `~/.claude.json`.
+
 ## Codex
 
-Add this to `~/.codex/config.toml`. Codex reads the token from the named variable and sends it as `Authorization: Bearer <token>`:
+Export the token from its file in your shell profile (`~/.zshrc`):
+
+```sh
+export ORCHID_MCP_TOKEN="$(cat ~/.orchid/board/mcp.token)"
+```
+
+T3 must inherit this variable. Start T3 from a shell that has it, or restart T3 after you add the line. An app launched from the Dock does not read `~/.zshrc`.
+
+Then add this to `~/.codex/config.toml`. Codex sends the variable's value as `Authorization: Bearer <token>`:
 
 ```toml
 [mcp_servers.orchid]
