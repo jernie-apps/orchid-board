@@ -100,12 +100,17 @@ const MIGRATIONS: readonly string[] = [
     used_at TEXT
   );
   `,
-  // 2: an agent's local "done" signal (MCP `done`). Kept on the cached issue; sync upserts leave it alone.
+  // 2: PR links parsed from closing keywords in PR bodies (#20).
+  `
+  ALTER TABLE pr_issues ADD COLUMN source TEXT NOT NULL DEFAULT 'github'
+    CHECK (source IN ('github', 'body', 'both'));
+  `,
+  // 3: an agent's local "done" signal (MCP `done`). Kept on the cached issue; sync upserts leave it alone.
   `
   ALTER TABLE issues ADD COLUMN done_by TEXT;
   ALTER TABLE issues ADD COLUMN done_at TEXT;
   `,
-  // 3: limit guesses against the current approve code.
+  // 4: limit guesses against the current approve code.
   `
   ALTER TABLE approve_codes ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0;
   `,

@@ -275,20 +275,20 @@ it('invalidates an outstanding code when a sent-back root is replaced', async t 
   assert.equal(store.getProposal(id)!.nodes[0]!.status, 'draft');
 });
 
-it('migrates existing codes from schema 2 and persists the attempt count across connections', t => {
+it('migrates existing codes from schema 3 and persists the attempt count across connections', t => {
   const dir = mkdtempSync(join(tmpdir(), 'orchid-proposals-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = dbPath(dir);
   const legacy = openStore(path);
   const { id } = legacy.createProposal({ nodes: [{ ...phase, type: 'Phase' }] });
   legacy.saveApproveCode(id, 'LEGACY', new Date(start.getTime() + 60_000), start);
-  legacy.db.exec("ALTER TABLE approve_codes DROP COLUMN failed_attempts; UPDATE meta SET value = '2' WHERE key = 'schema_version'");
+  legacy.db.exec("ALTER TABLE approve_codes DROP COLUMN failed_attempts; UPDATE meta SET value = '3' WHERE key = 'schema_version'");
   legacy.close();
 
   const first = openStore(path);
   const second = openStore(path);
   try {
-    assert.equal(schemaVersion(first.db), 3);
+    assert.equal(schemaVersion(first.db), 4);
     for (const store of [first, second, first, second]) {
       assert.deepEqual(store.consumeApproveCode(id, 'invalid', start), { ok: false, reason: 'wrong' });
     }
