@@ -100,6 +100,11 @@ const MIGRATIONS: readonly string[] = [
     used_at TEXT
   );
   `,
+  // 2: an agent's local "done" signal (MCP `done`). Kept on the cached issue; sync upserts leave it alone.
+  `
+  ALTER TABLE issues ADD COLUMN done_by TEXT;
+  ALTER TABLE issues ADD COLUMN done_at TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

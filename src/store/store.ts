@@ -61,6 +61,13 @@ export interface Claim {
   expiresAt: string;
 }
 
+/** An agent's local "done" signal for a task. Not written to GitHub. */
+export interface DoneReport {
+  task: string;
+  agent: string;
+  at: string;
+}
+
 export interface TreeNode extends Issue {
   children: TreeNode[];
   prs: Pr[];
@@ -416,6 +423,9 @@ export class Store {
            ON CONFLICT(task) DO UPDATE SET agent = excluded.agent, since = excluded.since, expires_at = excluded.expires_at`,
         )
         .run(claim.task, claim.agent, claim.since, claim.expiresAt);
+      // A new claim means work restarted: drop any earlier done signal.
+      const { repo, number } = parseRef(task);
+      this.db.prepare('UPDATE issues SET done_by = NULL, done_at = NULL WHERE repo = ? AND number = ?').run(repo, number);
       return claim;
     });
   }
@@ -453,6 +463,30 @@ export class Store {
   /** Delete expired claims. Returns how many were removed. */
   purgeExpiredClaims(now: Date = this.#clock()): number {
     return Number(this.db.prepare('DELETE FROM claims WHERE expires_at <= ?').run(now.toISOString()).changes);
+  }
+
+  /**
+   * Record that `agent` reported the task done and drop its claim. Local signal only.
+   * Throws ClaimConflictError if another agent holds an active claim, StoreError if the task is not cached.
+   */
+  markDone(task: string, agent: string, now: Date = this.#clock()): DoneReport {
+    const { repo, number } = parseRef(task);
+    if (agent === '') throw new StoreError('agent must be non-empty');
+    return tx(this.db, () => {
+      if (!this.getIssue(task)) throw new StoreError(`unknown task ${task}`);
+      this.release(task, agent, now);
+      const at = now.toISOString();
+      this.db.prepare('UPDATE issues SET done_by = ?, done_at = ? WHERE repo = ? AND number = ?').run(agent, at, repo, number);
+      return { task, agent, at };
+    });
+  }
+
+  /** The latest done signal for a task, or null. */
+  getDone(task: string): DoneReport | null {
+    const { repo, number } = parseRef(task);
+    const row = this.db.prepare('SELECT done_by, done_at FROM issues WHERE repo = ? AND number = ?').get(repo, number);
+    if (!row || row.done_by === null || row.done_at === null) return null;
+    return { task, agent: String(row.done_by), at: String(row.done_at) };
   }
 
   #claimRow(task: string): Claim | null {
