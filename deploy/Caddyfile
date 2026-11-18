@@ -1,0 +1,28 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	servers {
+		protocols h1 h2
+	}
+}
+
+orchid.jernie.app {
+	tls internal
+
+	header {
+		Strict-Transport-Security "max-age=300"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	@local remote_ip 127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7
+	handle @local {
+		reverse_proxy 127.0.0.1:{$ORCHID_BOARD_PORT:4310}
+	}
+	handle {
+		respond 403
+	}
+}
