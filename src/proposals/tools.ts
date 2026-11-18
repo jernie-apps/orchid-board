@@ -3,6 +3,7 @@ import { runTool, ToolError, type Toolset } from '../mcp/server.ts';
 import { isRef } from '../store/ref.ts';
 import type { ApproveResult } from '../store/store.ts';
 import { proposeTree, resubmitTree, type ProposalDeps } from './tree.ts';
+import type { ProposalWriter } from './writer.ts';
 
 const proposal = z.string().trim().min(1);
 const fields = {
@@ -26,8 +27,13 @@ const codeErrors: Record<Extract<ApproveResult, { ok: false }>['reason'], string
   locked: 'The approve code is locked after five incorrect attempts. Ask Por for a fresh code.',
 };
 
-export function proposalTools(deps: ProposalDeps): Toolset {
-  const { store } = deps;
+export interface ProposalToolsDeps extends ProposalDeps {
+  /** Creates approved trees in GitHub. Without it, approve only marks the proposal approved. */
+  writer?: Pick<ProposalWriter, 'kick' | 'status'>;
+}
+
+export function proposalTools(deps: ProposalToolsDeps): Toolset {
+  const { store, writer } = deps;
   return (server) => {
     server.registerTool('propose_tree', {
       description: 'Submit a nested Phase → Feature → Task draft for Por to review. Supply your agent name and optionally a cached Phase or Feature ref to attach below. Returns the proposal ID, node keys and branches.',
@@ -47,6 +53,33 @@ export function proposalTools(deps: ProposalDeps): Toolset {
       return store.getFeedback(input.proposal);
     }));
 
+    server.registerTool('get_proposal', {
+      description: 'Get a proposal with each node\'s review status and created issue ref, plus the GitHub write progress (running, last error, warnings, next retry).',
+      inputSchema: z.strictObject({ proposal }),
+      annotations: { readOnlyHint: true },
+    }, input => runTool(() => {
+      const found = store.getProposal(input.proposal);
+      if (!found) throw new ToolError('Unknown proposal.');
+      return {
+        id: found.id,
+        parent: found.parent,
+        agent: found.agent,
+        state: found.state,
+        nodes: found.nodes.map(node => ({
+          key: node.key,
+          parentKey: node.parentKey,
+          type: node.type,
+          repo: node.repo,
+          title: node.title,
+          branch: node.branch,
+          iteration: node.iteration,
+          status: node.status,
+          issue: node.issueNumber === null ? null : node.repo + '#' + node.issueNumber,
+        })),
+        write: writer?.status(found.id) ?? null,
+      };
+    }));
+
     server.registerTool('resubmit', {
       description: 'Replace sent-back nodes using their existing keys. Include each replacement subtree under children. Replacements return to draft for review.',
       inputSchema: z.strictObject({ proposal, nodes }),
@@ -58,7 +91,10 @@ export function proposalTools(deps: ProposalDeps): Toolset {
     }, input => runTool(() => {
       const result = store.approveProposal(input.proposal, input.code.trim());
       if (!result.ok) throw new ToolError(codeErrors[result.reason]);
-      return { proposal: input.proposal, state: 'approved' };
+      if (!writer) return { proposal: input.proposal, state: 'approved' };
+      // Kick off the GitHub write without waiting for it; progress shows in get_proposal.
+      void writer.kick(input.proposal);
+      return { proposal: input.proposal, state: 'approved', write: 'started (see get_proposal)' };
     }));
   };
 }
