@@ -12,9 +12,10 @@ const PROJECT_ITEM = `
   }
 `;
 const PULL_REQUEST = `
-  number url state isDraft
+  number url title updatedAt state isDraft
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 `;
+const CLOSING_PRS = 'closedByPullRequestsReferences';
 
 const REPO_ISSUES = `
   query RepoIssues($owner: String!, $name: String!, $since: DateTime, $cursor: String, $withProject: Boolean!) {
@@ -30,7 +31,7 @@ const REPO_ISSUES = `
           projectItems(first: 10, includeArchived: true) @include(if: $withProject) {
             ${PAGE_INFO} nodes { ${PROJECT_ITEM} }
           }
-          closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
+          ${CLOSING_PRS}(first: 10, includeClosedPrs: true) {
             ${PAGE_INFO} nodes { ${PULL_REQUEST} }
           }
         }
@@ -41,15 +42,30 @@ const REPO_ISSUES = `
 
 const SUB_ISSUES = issuePageQuery('IssueSubIssues', 'subIssues(first: 100, after: $cursor)', ISSUE_REF);
 const PROJECT_ITEMS = issuePageQuery('IssueProjectItems', 'projectItems(first: 100, after: $cursor, includeArchived: true)', PROJECT_ITEM);
-const PULL_REQUESTS = issuePageQuery('IssueClosingPullRequests', 'closedByPullRequestsReferences(first: 100, after: $cursor, includeClosedPrs: true)', PULL_REQUEST);
+const PULL_REQUESTS = issuePageQuery('IssueClosingPullRequests', `${CLOSING_PRS}(first: 100, after: $cursor, includeClosedPrs: true)`, PULL_REQUEST);
+const ISSUE_PULL_REQUESTS = `
+  query IssuesWithPullRequests($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Issue {
+        id
+        ${CLOSING_PRS}(first: 10, includeClosedPrs: true) { ${PAGE_INFO} nodes { ${PULL_REQUEST} } }
+      }
+    }
+  }
+`;
+const ISSUE_ID_BATCH_SIZE = 50;
 
 interface ApiIssueRef {
   number: number;
   repository: { nameWithOwner: `${string}/${string}` };
 }
 
-interface ApiIssue extends ApiIssueRef {
+interface ApiIssuePullRequests {
   id: string;
+  closedByPullRequestsReferences: GitHubPage<ApiPullRequest>;
+}
+
+interface ApiIssue extends ApiIssueRef, ApiIssuePullRequests {
   title: string;
   state: 'OPEN' | 'CLOSED';
   updatedAt: string;
@@ -57,7 +73,6 @@ interface ApiIssue extends ApiIssueRef {
   parent: ApiIssueRef | null;
   subIssues: GitHubPage<ApiIssueRef>;
   projectItems?: GitHubPage<ApiProjectItem>;
-  closedByPullRequestsReferences: GitHubPage<ApiPullRequest>;
 }
 
 interface ApiProjectItem {
@@ -68,6 +83,8 @@ interface ApiProjectItem {
 interface ApiPullRequest {
   number: number;
   url: string;
+  title: string;
+  updatedAt: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   commits: { nodes: ({ commit: { statusCheckRollup: { state: string } | null } } | null)[] | null };
@@ -95,10 +112,7 @@ export async function listIssues(
     for await (const subIssue of issuePages(client, issue.id, SUB_ISSUES, issue.subIssues)) {
       subIssueRefs.push(issueRef(subIssue));
     }
-    const pullRequests: PullRequest[] = [];
-    for await (const pr of issuePages(client, issue.id, PULL_REQUESTS, issue.closedByPullRequestsReferences)) {
-      pullRequests.push(pullRequest(pr));
-    }
+    const pullRequests = await closingPullRequests(client, issue);
     issues.push({
       ref: issueRef(issue),
       number: issue.number,
@@ -114,6 +128,32 @@ export async function listIssues(
     });
   }
   return issues;
+}
+
+/** Refresh PR links and checks even when the issues themselves have not changed. */
+export async function listIssuePullRequests(
+  client: QueryClient,
+  nodeIds: readonly string[],
+): Promise<Map<string, PullRequest[]>> {
+  const result = new Map<string, PullRequest[]>();
+  for (let offset = 0; offset < nodeIds.length; offset += ISSUE_ID_BATCH_SIZE) {
+    const ids = nodeIds.slice(offset, offset + ISSUE_ID_BATCH_SIZE);
+    const { nodes } = await client.graphql<{ nodes: (ApiIssuePullRequests | null)[] }>(
+      ISSUE_PULL_REQUESTS, { ids }, { allowMissingNodes: true },
+    );
+    for (const node of nodes) {
+      if (node?.id) result.set(node.id, await closingPullRequests(client, node));
+    }
+  }
+  return result;
+}
+
+async function closingPullRequests(client: QueryClient, issue: ApiIssuePullRequests): Promise<PullRequest[]> {
+  const result: PullRequest[] = [];
+  for await (const pr of issuePages(client, issue.id, PULL_REQUESTS, issue.closedByPullRequestsReferences)) {
+    result.push(pullRequest(pr));
+  }
+  return result;
 }
 
 function issuePageQuery(operation: string, connection: string, selection: string): string {
@@ -160,6 +200,8 @@ function pullRequest(pr: ApiPullRequest): PullRequest {
   return {
     number: pr.number,
     url: pr.url,
+    title: pr.title,
+    updatedAt: pr.updatedAt,
     state: pr.state === 'OPEN' ? 'open' : pr.state === 'MERGED' ? 'merged' : 'closed',
     draft: pr.isDraft,
     checkStatus: checkStatus(pr.commits.nodes?.[0]?.commit.statusCheckRollup?.state),

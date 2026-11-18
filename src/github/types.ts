@@ -10,6 +10,8 @@ export interface Iteration {
 export interface PullRequest {
   number: number;
   url: string;
+  title: string;
+  updatedAt: string;
   state: 'open' | 'closed' | 'merged';
   draft: boolean;
   checkStatus: CheckStatus;

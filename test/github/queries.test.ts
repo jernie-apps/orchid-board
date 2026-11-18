@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GitHubClient } from '../../src/github/client.ts';
-import { listIssues } from '../../src/github/queries.ts';
+import { listIssuePullRequests, listIssues } from '../../src/github/queries.ts';
 import { Secret } from '../../src/secrets.ts';
 import recorded from '../fixtures/github/recorded.json' with { type: 'json' };
 
@@ -9,6 +9,7 @@ const repo = { owner: 'companie-apps', name: 'orchid-board' };
 const phasePage = recorded.issues.data.repository.issues;
 const phase = phasePage.nodes[0]!;
 const merged = recorded.pullRequest.data.repository.pullRequest;
+const prUpdatedAt = '2026-11-18T07:00:00Z';
 
 function fakeClient(...pages: { operation: string; variables: object; response: unknown; selection: RegExp }[]) {
   const client = new GitHubClient(new Secret('github.token', 'fake-token'), {
@@ -44,6 +45,7 @@ function connectionPage<T>(nodes: T[]) {
 function pr(number: number, state: string, isDraft: boolean, check: string | null) {
   return {
     number, url: `https://github.com/companie-apps/orchid-board/pull/${number}`, state, isDraft,
+    title: `Pull request ${number}`, updatedAt: prUpdatedAt,
     commits: { nodes: [{ commit: { statusCheckRollup: check === null ? null : { state: check } } }] },
   };
 }
@@ -85,7 +87,7 @@ test('lists updated issues with hierarchy, configured iteration, and all linked 
         pr(17, 'OPEN', true, 'PENDING'), pr(18, 'CLOSED', false, 'FAILURE'), pr(19, 'OPEN', false, null),
         pr(20, 'OPEN', false, 'EXPECTED'), pr(21, 'OPEN', false, 'ERROR'),
       ]),
-      selection: /includeClosedPrs: true/,
+      selection: /number url title updatedAt state isDraft/,
     },
     {
       operation: 'IssueProjectItems', variables: { id: task.id, cursor: 'projects-2' },
@@ -110,14 +112,50 @@ test('lists updated issues with hierarchy, configured iteration, and all linked 
       state: 'closed', updatedAt: since, issueType: 'Task', parentRef: 'another-org/another-repo#21',
       subIssueRefs: [], iteration: { title: 'Sprint 2', iterationId: 'iteration-2' },
       pullRequests: [
-        { number: 16, url: merged.url, state: 'merged', draft: false, checkStatus: 'pass' },
-        { number: 17, url: 'https://github.com/companie-apps/orchid-board/pull/17', state: 'open', draft: true, checkStatus: 'running' },
-        { number: 18, url: 'https://github.com/companie-apps/orchid-board/pull/18', state: 'closed', draft: false, checkStatus: 'fail' },
-        { number: 19, url: 'https://github.com/companie-apps/orchid-board/pull/19', state: 'open', draft: false, checkStatus: 'none' },
-        { number: 20, url: 'https://github.com/companie-apps/orchid-board/pull/20', state: 'open', draft: false, checkStatus: 'running' },
-        { number: 21, url: 'https://github.com/companie-apps/orchid-board/pull/21', state: 'open', draft: false, checkStatus: 'fail' },
+        {
+          number: 16, url: merged.url, title: merged.title, updatedAt: merged.updatedAt,
+          state: 'merged', draft: false, checkStatus: 'pass',
+        },
+        ...[
+          [17, 'open', true, 'running'], [18, 'closed', false, 'fail'], [19, 'open', false, 'none'],
+          [20, 'open', false, 'running'], [21, 'open', false, 'fail'],
+        ].map(([number, state, draft, checkStatus]) => ({
+          number, url: `https://github.com/companie-apps/orchid-board/pull/${number}`,
+          title: `Pull request ${number}`, updatedAt: prUpdatedAt, state, draft, checkStatus,
+        })),
       ],
     },
+  ]);
+});
+
+test('refreshes only closing PRs for cached issue nodes in batches and pages', async () => {
+  const ids = Array.from({ length: 51 }, (_, i) => `issue-${i + 1}`);
+  const { client, verify } = fakeClient(
+    {
+      operation: 'IssuesWithPullRequests', variables: { ids: ids.slice(0, 50) }, selection: /nodes\(ids: \$ids\)/,
+      response: { data: { nodes: [
+        { id: ids[0], closedByPullRequestsReferences: firstPage([merged], 'pulls-2') },
+        { id: ids[1], closedByPullRequestsReferences: lastPage([]) },
+        ...Array(48).fill(null),
+      ] } },
+    },
+    {
+      operation: 'IssueClosingPullRequests', variables: { id: ids[0], cursor: 'pulls-2' },
+      selection: /includeClosedPrs: true/, response: connectionPage([pr(17, 'OPEN', false, 'PENDING')]),
+    },
+    {
+      operation: 'IssuesWithPullRequests', variables: { ids: ids.slice(50) },
+      selection: /number url title updatedAt state isDraft/,
+      response: {
+        data: { nodes: [null] },
+        errors: [{ type: 'NOT_FOUND', path: ['nodes', 0], message: 'This issue was deleted' }],
+      },
+    },
+  );
+  const result = await listIssuePullRequests(client, ids);
+  verify();
+  assert.deepEqual([...result].map(([id, prs]) => [id, prs.map(pr => [pr.number, pr.checkStatus])]), [
+    [ids[0], [[16, 'pass'], [17, 'running']]], [ids[1], []],
   ]);
 });
 

@@ -353,25 +353,37 @@ export class Store {
     return this.#prsByIssue().get(ref) ?? [];
   }
 
-  #prsByIssue(): Map<string, Pr[]> {
+  listPrs(): Pr[] {
+    const links = new Map<string, string[]>();
+    const linkRows = this.db
+      .prepare('SELECT pr_repo, pr_number, issue FROM pr_issues ORDER BY issue')
+      .all();
+    for (const row of linkRows) {
+      const ref = formatRef(String(row.pr_repo), Number(row.pr_number));
+      const issues = links.get(ref);
+      const issue = String(row.issue);
+      if (issues) issues.push(issue);
+      else links.set(ref, [issue]);
+    }
     const rows = this.db
       .prepare(
-        `SELECT p.*, c.rollup, l.issue FROM prs p
-         JOIN pr_issues l ON l.pr_repo = p.repo AND l.pr_number = p.number
+        `SELECT p.*, c.rollup FROM prs p
          LEFT JOIN checks c ON c.pr_repo = p.repo AND c.pr_number = p.number
-         ORDER BY p.repo, p.number, l.issue`,
+         ORDER BY p.repo, p.number`,
       )
       .all();
-    const links = new Map<string, string[]>();
-    for (const row of rows) {
-      const pr = formatRef(String(row.repo), Number(row.number));
-      links.set(pr, [...(links.get(pr) ?? []), String(row.issue)]);
-    }
+    return rows.map(row => toPr(row, links.get(formatRef(String(row.repo), Number(row.number))) ?? []));
+  }
+
+  #prsByIssue(): Map<string, Pr[]> {
     const out = new Map<string, Pr[]>();
-    for (const row of rows) {
-      const pr = toPr(row, links.get(formatRef(String(row.repo), Number(row.number))) ?? []);
-      const issue = String(row.issue);
-      out.set(issue, [...(out.get(issue) ?? []), pr]);
+    for (const pr of this.listPrs()) {
+      for (const issue of pr.issues) {
+        const prs = out.get(issue);
+        const entry = { ...pr };
+        if (prs) prs.push(entry);
+        else out.set(issue, [entry]);
+      }
     }
     return out;
   }

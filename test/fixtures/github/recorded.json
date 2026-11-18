@@ -103,6 +103,8 @@
         "pullRequest": {
           "number": 16,
           "url": "https://github.com/companie-apps/orchid-board/pull/16",
+          "title": "Added - repo skeleton, config loader, secrets, CI (#6)",
+          "updatedAt": "2026-11-18T06:20:48Z",
           "state": "MERGED",
           "isDraft": false,
           "commits": {
