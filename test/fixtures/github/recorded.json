@@ -1,0 +1,125 @@
+{
+  "issues": {
+    "data": {
+      "repository": {
+        "issues": {
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0xOFQwNTo1MDo0M1rPAAAAAYEaDe0="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOVynwd88AAAABgRoN7Q",
+              "title": "Orchid Board v1",
+              "state": "OPEN",
+              "updatedAt": "2026-11-18T05:50:43Z",
+              "issueType": {
+                "name": "Phase"
+              },
+              "number": 1,
+              "repository": {
+                "nameWithOwner": "companie-apps/orchid-board"
+              },
+              "parent": null,
+              "subIssues": {
+                "pageInfo": {
+                  "hasNextPage": true,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 2,
+                    "repository": {
+                      "nameWithOwner": "companie-apps/orchid-board"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "companie-apps"
+                      }
+                    },
+                    "fieldValueByName": null
+                  }
+                ]
+              },
+              "closedByPullRequestsReferences": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "subIssues": {
+    "data": {
+      "node": {
+        "connection": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "NA"
+          },
+          "nodes": [
+            {
+              "number": 3,
+              "repository": {
+                "nameWithOwner": "companie-apps/orchid-board"
+              }
+            },
+            {
+              "number": 4,
+              "repository": {
+                "nameWithOwner": "companie-apps/orchid-board"
+              }
+            },
+            {
+              "number": 5,
+              "repository": {
+                "nameWithOwner": "companie-apps/orchid-board"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "pullRequest": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "number": 16,
+          "url": "https://github.com/companie-apps/orchid-board/pull/16",
+          "title": "Added - repo skeleton, config loader, secrets, CI (#6)",
+          "updatedAt": "2026-11-18T06:20:48Z",
+          "state": "MERGED",
+          "isDraft": false,
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

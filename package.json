@@ -1,0 +1,25 @@
+{
+  "name": "orchid-board",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted task board over GitHub issues plus an MCP server for T3 agents.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "start": "node src/main.ts",
+    "approve-code": "node src/proposals/approve-code-cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}
