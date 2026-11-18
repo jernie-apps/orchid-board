@@ -79,8 +79,11 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   poller.start();
-  // Finish approved proposals left unfinished by a crash or failed write. kick() never rejects.
-  void writer.resumeAll();
+  // Finish approved proposals left unfinished by a crash or failed write.
+  writer.resumeAll().catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : 'unknown error';
+    console.error(`orchid-board: resume writes: ${redact(detail, secrets)}`);
+  });
 }
 
 main().catch((err: unknown) => {
