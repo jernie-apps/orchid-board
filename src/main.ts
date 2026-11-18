@@ -1,6 +1,8 @@
 import { ConfigError, boardHome, loadConfig } from './config.ts';
+import { GitHubClient } from './github/client.ts';
 import { McpServerError, startMcpServer, taskTools } from './mcp/server.ts';
 import { proposalTools } from './proposals/tools.ts';
+import { ProposalWriter } from './proposals/writer.ts';
 import { hasSecret, readSecret, redact, SecretError, type SecretName } from './secrets.ts';
 import { dbPath } from './store/db.ts';
 import { openStore } from './store/store.ts';
@@ -27,6 +29,17 @@ async function main(): Promise<void> {
       console.error(`orchid-board: sync ${repo}: ${redact(detail, secrets)}`);
     },
   });
+  const writeAbort = new AbortController();
+  const writer = new ProposalWriter({
+    store,
+    client: new GitHubClient(token, { signal: writeAbort.signal }),
+    project: config.project,
+    secrets,
+    onWritten: repos => poller.pollNow(repos),
+    onError: (proposal, message) => {
+      console.error(`orchid-board: write ${proposal}: ${redact(message, secrets)}`);
+    },
+  });
   let mcp;
   try {
     mcp = await startMcpServer({
@@ -34,7 +47,7 @@ async function main(): Promise<void> {
       token: mcpToken,
       toolsets: [
         taskTools({ store, claimTtlMs: config.claimTtlMinutes * 60_000 }),
-        proposalTools({ store, repos: config.repos }),
+        proposalTools({ store, repos: config.repos, writer }),
       ],
       onError: (error) => {
         const detail = error instanceof Error ? error.message : 'unknown error';
@@ -58,12 +71,16 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     await mcp.close();
+    writeAbort.abort();
+    await writer.stop();
     await poller.stop();
     store.close();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   poller.start();
+  // Finish approved proposals left unfinished by a crash or failed write. kick() never rejects.
+  void writer.resumeAll();
 }
 
 main().catch((err: unknown) => {

@@ -72,7 +72,7 @@ async function setup(t: TestContext) {
 it('registers all four proposal tools and stores a typed draft without changing the issue cache', async t => {
   const { store, client, propose } = await setup(t);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['approve', 'get_feedback', 'propose_tree', 'resubmit']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['approve', 'get_feedback', 'get_proposal', 'propose_tree', 'resubmit']);
   const proposal = await propose([{ ...phase, children: [
     { ...feature, children: [{ ...task, key: undefined, title: '  Draft changes  ', body: 'Details', iteration: 'Sprint 2' }] },
   ] }]);
