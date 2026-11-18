@@ -18,7 +18,6 @@
       const saved = form.querySelector('[data-saved]');
       const send = form.querySelector('[data-send]');
       const approve = form.querySelector('[data-approve]');
-      const approveText = approve ? approve.textContent : '';
 
       const counts = () => {
         const ticked = new Set();
@@ -29,14 +28,15 @@
           send.disabled = ticked.size === 0;
         }
         if (approve) {
-          // Ticked items (and everything under them) are held back until they are sent back or unticked.
+          // Ticked items (and everything under them) are held back from this approval.
           let n = 0;
           for (const row of form.querySelectorAll('.node[data-ok]')) {
             const anc = row.dataset.anc ? row.dataset.anc.split(' ') : [];
             if (!ticked.has(row.dataset.i) && !anc.some(i => ticked.has(i))) n++;
           }
-          approve.disabled = ticked.size > 0 || n === 0;
-          approve.textContent = ticked.size ? `Approve ${n} after sending back` : approveText;
+          // Approving with ticks creates the rest; ticked items stay drafts for review or send-back.
+          approve.disabled = n === 0;
+          approve.textContent = `Approve ${n} ${n === 1 ? 'issue' : 'issues'}`;
         }
       };
 

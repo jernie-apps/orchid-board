@@ -469,10 +469,12 @@ export function renderPage(view: BoardView, query: BoardQuery): string {
   return page(renderApp(view, query), true);
 }
 
-export function renderLogin(error: string | null = null): string {
+/** `csrf`: the pre-session token, echoed against its cookie on POST /login. */
+export function renderLogin(error: string | null = null, csrf?: string): string {
   return page([
     '<main class="login">',
     '<form class="login-card" method="post" action="/login">',
+    csrfField(csrf),
     `<div class="brand">${LOGO}<h1>Orchid Board</h1></div>`,
     '<label for="passphrase">Passphrase</label>',
     '<input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required autofocus>',

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Secret } from '../secrets.ts';
-import type { Store } from '../store/store.ts';
+import { underReview, type Store } from '../store/store.ts';
 import type { SyncEvents } from '../sync/poller.ts';
 import { applyProposalPost, applySendBack, isProposalId, renderInbox, type InboxOutcome, type InboxState, type InboxWriter } from './inbox.ts';
 import { parseQuery, renderApp, renderLogin, renderPage, type BoardQuery, type BoardView } from './render.ts';
@@ -35,6 +35,9 @@ export interface WebServer {
 }
 
 const COOKIE = 'orchid_session';
+/** Pre-session CSRF token for the login form (double-submit: cookie + hidden field). */
+const LOGIN_COOKIE = 'orchid_login';
+const LOGIN_TOKEN_TTL_S = 3600;
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 60_000;
@@ -114,6 +117,11 @@ function clientKey(req: IncomingMessage): string {
   return last || req.socket.remoteAddress || 'unknown';
 }
 
+/** Browsers label cross-site requests; refuse those outright on POST (defence in depth next to the tokens). */
+function crossSite(req: IncomingMessage): boolean {
+  return req.headers['sec-fetch-site'] === 'cross-site';
+}
+
 function cookie(req: IncomingMessage, name: string): string | null {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const eq = part.indexOf('=');
@@ -157,7 +165,7 @@ export function buildView(
     ...(query.repo ? { repo: query.repo } : {}),
     ...(query.sprint ? { iteration: query.sprint } : {}),
   });
-  const inboxCount = store.listProposals('pending').length;
+  const inboxCount = store.listProposals().filter(underReview).length;
   return { tree, repos, sprints, issueCount: issues.length, lastSyncAt: sync.lastSyncAt, mcpPort, now, inboxCount, ...(csrf ? { csrf } : {}) };
 }
 
@@ -226,25 +234,41 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const method = req.method ?? 'GET';
 
     if (path === '/login') {
+      // There is no session yet, so the login form carries its own token: a random value set as a
+      // Strict, HttpOnly cookie scoped to /login and echoed in a hidden field. A cross-site page can
+      // neither read the cookie nor make the browser send it, so it cannot forge a matching pair.
+      const given = cookie(req, LOGIN_COOKIE);
+      const loginToken = given !== null && /^[A-Za-z0-9_-]{43}$/.test(given) ? given : randomBytes(32).toString('base64url');
+      const loginCookie = { 'Set-Cookie': `${LOGIN_COOKIE}=${loginToken}; Path=/login; Max-Age=${LOGIN_TOKEN_TTL_S}; HttpOnly; Secure; SameSite=Strict` };
+      const loginPage = (status: number, error: string | null, headers: Record<string, string> = {}) =>
+        send(res, status, renderLogin(error, loginToken), { ...loginCookie, ...headers });
       if (method === 'GET') {
         if (session(req)) return redirect(res, '/');
-        return send(res, 200, renderLogin());
+        return loginPage(200, null);
       }
       if (method !== 'POST') return send(res, 405, 'Method not allowed', { Allow: 'GET, POST' });
       const key = clientKey(req);
       if (limiter.blocked(key, now())) {
-        return send(res, 429, renderLogin('Too many attempts. Wait a minute and try again.'), { 'Retry-After': '60' });
+        return loginPage(429, 'Too many attempts. Wait a minute and try again.', { 'Retry-After': '60' });
       }
       const form = await readForm(req);
-      if (!form) return send(res, 413, renderLogin('Request too large.'));
+      if (!form) return loginPage(413, 'Request too large.');
+      if (crossSite(req) || given === null || !tokenMatches(form.get('csrf') ?? '', given)) {
+        return loginPage(403, 'This sign-in form expired. Try again.');
+      }
       if (!passphraseMatches(form.get('passphrase') ?? '', passphrase)) {
         limiter.fail(key, now());
-        return send(res, 401, renderLogin('Wrong passphrase.'));
+        return loginPage(401, 'Wrong passphrase.');
       }
       const id = randomBytes(32).toString('base64url');
       sessions.set(id, { expires: now() + ttl, csrf: randomBytes(32).toString('base64url') });
       const maxAge = Math.floor(ttl / 1000);
-      return redirect(res, '/', { 'Set-Cookie': `${COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict` });
+      return redirect(res, '/', {
+        'Set-Cookie': [
+          `${COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`,
+          `${LOGIN_COOKIE}=; Path=/login; Max-Age=0; HttpOnly; Secure; SameSite=Strict`,
+        ],
+      });
     }
 
     // Public on purpose: the login page needs its stylesheet. It holds no board data.
@@ -264,7 +288,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (method === 'POST') {
       form = await readForm(req, path.startsWith('/inbox/') ? MAX_INBOX_BODY : MAX_BODY);
       if (!form) return send(res, 413, 'Request too large', { 'Content-Type': 'text/plain; charset=utf-8' });
-      if (!tokenMatches(form.get('csrf') ?? '', csrf)) {
+      if (crossSite(req) || !tokenMatches(form.get('csrf') ?? '', csrf)) {
         return send(res, 403, 'Invalid or missing CSRF token. Reload the page and try again.', { 'Content-Type': 'text/plain; charset=utf-8' });
       }
     }
@@ -281,7 +305,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const showInbox = (status: number, state: InboxState = {}) => {
         const proposals = store.listProposals();
         const selected = proposalId === null
-          ? proposals.filter(p => p.state === 'pending').sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
+          ? proposals.filter(p => underReview(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
           : store.getProposal(proposalId);
         if (!selected && proposalId !== null) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
         const html = renderInbox({

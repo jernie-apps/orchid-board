@@ -782,7 +782,7 @@ export class Store {
   #reviewableNode(id: string, key: string, allowSentBack = false): ProposalNode {
     const proposal = this.getProposal(id);
     if (!proposal) throw new StoreError(`no proposal ${id}`);
-    if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be edited');
+    if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
     const node = proposal.nodes.find(n => n.key === key);
     if (!node) throw new StoreError(`no node "${key}" in proposal ${id}`);
     if (node.status !== 'draft' && !(allowSentBack && node.status === 'sent_back')) {
@@ -831,14 +831,22 @@ export class Store {
     });
   }
 
-  /** Consume the code and release reviewed draft nodes to the GitHub writer in one transaction. */
-  approveProposal(id: string, code: string, now: Date = this.#clock()): ApproveResult {
+  /**
+   * Consume the code and release reviewed draft nodes to the GitHub writer in one transaction.
+   * `withhold`: draft nodes Por keeps for more review; they and their subtrees stay draft, and the
+   * proposal can be approved again later (see underReview).
+   */
+  approveProposal(id: string, code: string, now: Date = this.#clock(), options: { withhold?: Iterable<string> } = {}): ApproveResult {
     return tx(this.db, () => {
       const result = this.consumeApproveCode(id, code, now);
       if (!result.ok) return result;
       const proposal = this.getProposal(id)!;
-      if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be approved');
-      const plan = approvalPlan(proposal, this.droppedNodeKeys(id));
+      if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be approved');
+      const withhold = new Set(options.withhold ?? []);
+      for (const key of withhold) {
+        if (!proposal.nodes.some(node => node.key === key)) throw new StoreError(`no node "${key}" in proposal ${id}`);
+      }
+      const plan = approvalPlan(proposal, this.droppedNodeKeys(id), withhold);
       const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
       for (const key of plan.dropped) remove.run(id, key);
       for (const key of plan.approve) this.setNodeStatus(id, key, 'approved');
@@ -868,8 +876,11 @@ function subtreeOf(nodes: readonly ProposalNode[], root: string): Set<string> {
  * `approve`: draft nodes that become approved; a sent-back node holds back its whole subtree.
  * The web inbox shows the same numbers, so the label and the store never disagree.
  */
-export function approvalPlan(proposal: Pick<Proposal, 'nodes'>, droppedKeys: Iterable<string>): { dropped: string[]; approve: string[] } {
+export function approvalPlan(
+  proposal: Pick<Proposal, 'nodes'>, droppedKeys: Iterable<string>, withheldKeys: Iterable<string> = [],
+): { dropped: string[]; approve: string[] } {
   const direct = new Set(droppedKeys);
+  const withheld = new Set(withheldKeys);
   const dropped = new Set<string>();
   const blocked = new Set<string>();
   const approve: string[] = [];
@@ -878,13 +889,23 @@ export function approvalPlan(proposal: Pick<Proposal, 'nodes'>, droppedKeys: Ite
     if (direct.has(node.key) || (parent !== null && dropped.has(parent))) {
       if (node.status === 'approved' || node.status === 'created') throw new StoreError(`cannot drop ${node.status} node "${node.key}"`);
       dropped.add(node.key);
-    } else if (node.status === 'sent_back' || (parent !== null && blocked.has(parent))) {
+    } else if (node.status === 'sent_back' || withheld.has(node.key) || (parent !== null && blocked.has(parent))) {
       blocked.add(node.key);
     } else if (node.status === 'draft') {
       approve.push(node.key);
     }
   }
   return { dropped: [...dropped], approve };
+}
+
+/**
+ * Por can still review (edit, drop, send back, approve) a proposal that is pending, or an approved one
+ * with draft items he withheld at approval. Sent-back subtrees wait for the agent, not for Por.
+ */
+export function underReview(proposal: Pick<Proposal, 'state' | 'nodes'>): boolean {
+  if (proposal.state === 'pending') return true;
+  if (proposal.state !== 'approved' && proposal.state !== 'done') return false;
+  return approvalPlan(proposal, []).approve.length > 0;
 }
 
 function hashCode(proposalId: string, code: string): string {

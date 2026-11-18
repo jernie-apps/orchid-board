@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { StoreError, type Store } from '../store/store.ts';
+import { StoreError, underReview, type Store } from '../store/store.ts';
 
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const CODE_LENGTH = 6;
@@ -10,7 +10,8 @@ export function issueApproveCode(store: Store, proposalId: string, now = new Dat
   return store.transaction(() => {
     const proposal = store.getProposal(proposalId);
     if (!proposal) throw new StoreError('unknown proposal');
-    if (proposal.state !== 'pending') throw new StoreError('only pending proposals can receive an approve code');
+    // Approved proposals qualify only while Por still holds withheld draft items for review.
+    if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can receive an approve code');
     const code = Array.from({ length: CODE_LENGTH }, () => ALPHABET[randomInt(ALPHABET.length)]!).join('');
     store.saveApproveCode(proposalId, code, new Date(now.getTime() + TTL_MS), now);
     return code;

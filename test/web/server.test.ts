@@ -5,6 +5,7 @@ import { Secret } from '../../src/secrets.ts';
 import type { WriteStatus } from '../../src/proposals/writer.ts';
 import { openStore } from '../../src/store/store.ts';
 import type { SyncEvents } from '../../src/sync/poller.ts';
+import { resubmitTree } from '../../src/proposals/tree.ts';
 import type { InboxWriter } from '../../src/web/inbox.ts';
 import { LoginLimiter, passphraseMatches, startWebServer } from '../../src/web/server.ts';
 
@@ -27,12 +28,21 @@ async function fixture(t: TestContext, writer?: InboxWriter) {
   });
   const base = `http://127.0.0.1:${server.port}`;
   const request = (path: string, init: RequestInit = {}) => fetch(base + path, { redirect: 'manual', ...init });
-  const login = (passphrase: string, headers: Record<string, string> = {}) =>
-    request('/login', {
+  /** GET /login: the pre-session CSRF cookie and the token embedded in the form. */
+  const loginForm = async () => {
+    const page = await request('/login');
+    const token = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1];
+    assert.ok(token, 'login form embeds a CSRF token');
+    return { token, jar: (page.headers.get('set-cookie') ?? '').split(';')[0]! };
+  };
+  const login = async (passphrase: string, headers: Record<string, string> = {}) => {
+    const { token, jar } = await loginForm();
+    return request('/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
-      body: new URLSearchParams({ passphrase }).toString(),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: jar, ...headers },
+      body: new URLSearchParams({ passphrase, csrf: token }).toString(),
     });
+  };
   const session = async () => {
     const res = await login(PASSPHRASE);
     assert.equal(res.status, 303);
@@ -53,7 +63,7 @@ async function fixture(t: TestContext, writer?: InboxWriter) {
       });
     return { cookie, csrf, post, get: (path: string) => request(path, { headers: { cookie } }) };
   };
-  return { server, sync, store, request, login, session, authed };
+  return { server, sync, store, request, login, loginForm, session, authed };
 }
 
 /** Phase → Feature (two Tasks) + a second Feature, proposed by Claude. */
@@ -126,7 +136,7 @@ test('wrong passphrase is refused; the right one sets a hardened session cookie'
   const { request, login } = await fixture(t);
   const wrong = await login('nope');
   assert.equal(wrong.status, 401);
-  assert.equal(wrong.headers.get('set-cookie'), null);
+  assert.doesNotMatch(wrong.headers.get('set-cookie') ?? '', /orchid_session=/);
   assert.match(await wrong.text(), /Wrong passphrase/);
 
   const ok = await login(PASSPHRASE);
@@ -134,6 +144,7 @@ test('wrong passphrase is refused; the right one sets a hardened session cookie'
   assert.equal(ok.headers.get('location'), '/');
   const cookie = ok.headers.get('set-cookie') ?? '';
   assert.match(cookie, /^orchid_session=[A-Za-z0-9_-]{43};/);
+  assert.match(cookie, /orchid_login=; Path=\/login; Max-Age=0/);
   for (const flag of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(cookie.includes(flag), flag);
 
   const page = await request('/', { headers: { cookie: cookie.split(';')[0]! } });
@@ -152,10 +163,40 @@ test('failed logins are rate limited per client', async t => {
   // Blocked before the passphrase is checked, even when it is right.
   const blocked = await login(PASSPHRASE, alice);
   assert.equal(blocked.status, 429);
-  assert.equal(blocked.headers.get('set-cookie'), null);
+  assert.doesNotMatch(blocked.headers.get('set-cookie') ?? '', /orchid_session=/);
   // Caddy appends the real client last; a spoofed first hop does not dodge the limit.
   assert.equal((await login(PASSPHRASE, { 'x-forwarded-for': '10.0.0.1, 192.168.1.20' })).status, 429);
   assert.equal((await login(PASSPHRASE, { 'x-forwarded-for': '192.168.1.21' })).status, 303);
+});
+
+test('the pre-session login form is CSRF protected by a cookie-bound token', async t => {
+  const { request, loginForm } = await fixture(t);
+  const page = await request('/login');
+  const set = page.headers.get('set-cookie') ?? '';
+  assert.match(set, /^orchid_login=[A-Za-z0-9_-]{43}; Path=\/login; Max-Age=3600; HttpOnly; Secure; SameSite=Strict$/);
+  const post = (fields: Record<string, string>, cookie?: string, headers: Record<string, string> = {}) =>
+    request('/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}), ...headers },
+      body: new URLSearchParams(fields).toString(),
+    });
+  const { token, jar } = await loginForm();
+  const other = await loginForm();
+  const refused = [
+    await post({ passphrase: PASSPHRASE }),                                  // no token, no cookie
+    await post({ passphrase: PASSPHRASE, csrf: token }),                     // token without its cookie
+    await post({ passphrase: PASSPHRASE }, jar),                             // cookie without the token
+    await post({ passphrase: PASSPHRASE, csrf: other.token }, jar),          // another form's token
+    await post({ passphrase: PASSPHRASE, csrf: token }, jar, { 'sec-fetch-site': 'cross-site' }),
+  ];
+  for (const res of refused) {
+    assert.equal(res.status, 403);
+    assert.doesNotMatch(res.headers.get('set-cookie') ?? '', /orchid_session=/);
+    assert.match(await res.text(), /This sign-in form expired/);
+  }
+  const ok = await post({ passphrase: PASSPHRASE, csrf: token }, jar, { 'sec-fetch-site': 'same-origin' });
+  assert.equal(ok.status, 303);
+  assert.match(ok.headers.get('set-cookie') ?? '', /orchid_session=/);
 });
 
 test('LoginLimiter forgets failures after the window', () => {
@@ -303,23 +344,32 @@ test('title edits and drops persist; approve creates the rest and kicks the writ
   assert.deepEqual(store.droppedNodeKeys(id), []);
   assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'drop:f2']])).status, 303);
 
-  // Ticked items block approval until they are sent back or unticked.
-  const ticked = await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 't2']]);
-  assert.equal(ticked.status, 409);
-  assert.equal(store.getProposal(id)!.state, 'pending');
-  assert.deepEqual(kicked, []);
-
-  const approved = await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve']]);
-  assert.equal(approved.status, 303);
-  const after = store.getProposal(id)!;
+  // Approve with a ticked item: the rest is created, the ticked one stays a draft for more review.
+  const partial = await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 't2']]);
+  assert.equal(partial.status, 303);
+  let after = store.getProposal(id)!;
   assert.equal(after.state, 'approved');
-  assert.deepEqual(after.nodes.map(n => [n.key, n.status]), [['p', 'approved'], ['f1', 'approved'], ['t1', 'approved'], ['t2', 'approved']]);
+  assert.deepEqual(after.nodes.map(n => [n.key, n.status]), [['p', 'approved'], ['f1', 'approved'], ['t1', 'approved'], ['t2', 'draft']]);
   assert.deepEqual(kicked, [id]);
   assert.deepEqual(store.droppedNodeKeys(id), []);
+  html = await (await get('/inbox')).text();
+  assert.ok(html.includes('Waiting for you · 1'));
+  assert.ok(html.includes('Claude · 1 item withheld'));
+  html = await (await get(`/inbox/${id}`)).text();
+  assert.ok(html.includes('name="title:t2"'));
+  assert.ok(!html.includes('name="title:t1"'));
+  assert.ok(html.includes('Approve 1 issue'));
+  assert.ok(html.includes('value="code">Show approve code'));
 
-  // Approved proposals are read-only.
+  // Approving again releases the withheld item to the writer.
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve']])).status, 303);
+  after = store.getProposal(id)!;
+  assert.deepEqual(after.nodes.map(n => [n.key, n.status]), [['p', 'approved'], ['f1', 'approved'], ['t1', 'approved'], ['t2', 'approved']]);
+  assert.deepEqual(kicked, [id, id]);
+
+  // With nothing withheld, approved proposals are read-only.
   assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve']])).status, 409);
-  assert.deepEqual(kicked, [id]);
+  assert.deepEqual(kicked, [id, id]);
   html = await (await get(`/inbox/${id}`)).text();
   assert.ok(html.includes('Approved. Creating 4 issues in GitHub.'));
   assert.ok(!html.includes('name="title:'));
@@ -401,4 +451,32 @@ test('approved proposals show GitHub write progress and errors', async t => {
   assert.ok(html.includes('Created #41'));
   assert.ok(html.includes(`href="https://github.com/${REPO}/issues/41"`));
   assert.ok(html.includes('Approved · writing'));
+});
+
+test('withheld subtrees keep parent-child integrity and stay open to send-back and resubmission', async t => {
+  const { writer, kicked } = fakeWriter();
+  const { store, authed } = await fixture(t, writer);
+  const id = propose(store).id;
+  const { csrf, post, get } = await authed();
+  // Withholding a Feature holds its Tasks too, even unticked ones.
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 'f1']])).status, 303);
+  const status = () => Object.fromEntries(store.getProposal(id)!.nodes.map(n => [n.key, n.status]));
+  assert.deepEqual(status(), { p: 'approved', f1: 'draft', t1: 'draft', t2: 'draft', f2: 'approved', t3: 'approved' });
+  assert.deepEqual(kicked, [id]);
+
+  // Send one withheld Task back; the agent reads it through get_feedback like any other.
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'review'], ['tick', 't1']])).status, 200);
+  assert.equal((await post(`/inbox/${id}/send-back`, [['csrf', csrf], ['key', 't1'], ['note:t1', 'Too big']])).status, 303);
+  assert.deepEqual(store.getFeedback(id).sentBack.map(n => n.key), ['t1']);
+
+  // Writer-side the proposal is still approved; the agent resubmits through the MCP path.
+  resubmitTree({ store, repos: [{ owner: 'companie-apps', name: 'orchid-board' }] }, id, [
+    { key: 't1', type: 'Task', repo: REPO, title: 'dark-theme tokens' },
+  ]);
+  assert.equal(store.getProposal(id)!.state, 'pending');
+  assert.deepEqual(status(), { p: 'approved', f1: 'draft', t1: 'draft', t2: 'draft', f2: 'approved', t3: 'approved' });
+  assert.ok((await (await get(`/inbox/${id}`)).text()).includes('Approve 3 issues'));
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve']])).status, 303);
+  assert.deepEqual(status(), { p: 'approved', f1: 'approved', t1: 'approved', t2: 'approved', f2: 'approved', t3: 'approved' });
+  assert.deepEqual(kicked, [id, id]);
 });

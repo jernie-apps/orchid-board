@@ -1,6 +1,6 @@
 import { issueApproveCode } from '../proposals/approve-code.ts';
 import type { WriteStatus } from '../proposals/writer.ts';
-import { approvalPlan, StoreError, type Feedback, type Proposal, type ProposalNode, type Store } from '../store/store.ts';
+import { approvalPlan, StoreError, underReview, type Feedback, type Proposal, type ProposalNode, type Store } from '../store/store.ts';
 import { ago, badge, csrfField, escapeHtml as esc, LOGO, logoutForm, page, shortRepo, type Status } from './render.ts';
 
 // Web inbox: Por reviews agent proposals, edits titles, drops nodes, approves or sends items back.
@@ -67,7 +67,7 @@ export function applyProposalPost(store: Store, writer: InboxWriter | null, id: 
   const back = { kind: 'redirect', location: proposalHref(id) } as const;
   try {
     if (op === 'code') return { kind: 'render', status: 200, state: { code: issueApproveCode(store, id, new Date(now)) } };
-    if (proposal.state === 'pending') saveTitles(store, proposal, form, now);
+    if (underReview(proposal)) saveTitles(store, proposal, form, now);
     if (op === 'save') return back;
     if (op.startsWith('drop:')) {
       store.dropProposalNode(id, op.slice(5));
@@ -83,13 +83,11 @@ export function applyProposalPost(store: Store, writer: InboxWriter | null, id: 
       return { kind: 'render', status: 200, state: { ticked, confirm: { keys: ticked, notes: {}, note: '', check: false } } };
     }
     if (op === 'approve') {
-      if (ticked.length > 0) {
-        return { kind: 'render', status: 409, state: { ticked, error: 'Some items are ticked. Send them back or untick them before you approve.' } };
-      }
       // Por approves in person: issue a code and consume it at once, the same path the MCP approve tool takes.
+      // Ticked items (and their subtrees) are withheld: they stay draft for more review or a send-back.
       store.transaction(() => {
         const at = new Date(now);
-        const result = store.approveProposal(id, issueApproveCode(store, id, at), at);
+        const result = store.approveProposal(id, issueApproveCode(store, id, at), at, { withhold: ticked });
         if (!result.ok) throw new StoreError('approval failed; try again');
       });
       if (writer) void writer.kick(id);
@@ -155,7 +153,7 @@ function saveTitles(store: Store, proposal: Proposal, form: URLSearchParams, now
 /** Only live draft nodes can be sent back: not dropped, not already sent back, approved or created. */
 function checkSendable(store: Store, id: string, keys: readonly string[]): void {
   const proposal = store.getProposal(id)!;
-  if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be sent back');
+  if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be sent back');
   const dropped = new Set(approvalPlan(proposal, store.droppedNodeKeys(id)).dropped);
   for (const key of keys) {
     const node = proposal.nodes.find(n => n.key === key);
@@ -210,18 +208,22 @@ function listMeta(proposal: Proposal, now: number): string {
   if (proposal.state === 'pending') {
     return [agentName(proposal), reposOf(proposal), plural(proposal.nodes.length, 'issue'), age].join(' · ');
   }
+  if (underReview(proposal)) {
+    const held = approvalPlan(proposal, []).approve.length;
+    return [agentName(proposal), `${plural(held, 'item')} withheld`, age].join(' · ');
+  }
   const created = proposal.nodes.filter(node => node.issueNumber !== null).length;
   const state = { approved: 'Approved · writing', done: 'Approved', rejected: 'Rejected', pending: '' }[proposal.state];
   return [state, plural(created, 'issue') + ' created', sinceText(proposal.updatedAt, now)].join(' · ');
 }
 
 function renderList(view: InboxView): string {
-  const pending = view.proposals.filter(p => p.state === 'pending').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const earlier = view.proposals.filter(p => p.state !== 'pending')
+  const pending = view.proposals.filter(p => underReview(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const earlier = view.proposals.filter(p => !underReview(p))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, EARLIER);
   const item = (p: Proposal) => {
     const on = view.selected?.id === p.id;
-    return `<a class="prop${on ? ' on' : ''}${p.state === 'pending' ? ' pending' : ''}" href="${esc(proposalHref(p.id))}"${on ? ' aria-current="page"' : ''}>`
+    return `<a class="prop${on ? ' on' : ''}${underReview(p) ? ' pending' : ''}" href="${esc(proposalHref(p.id))}"${on ? ' aria-current="page"' : ''}>`
       + `<span class="prop-t">${esc(proposalTitle(p))}</span><span class="meta">${esc(listMeta(p, view.now))}</span></a>`;
   };
   return [
@@ -318,7 +320,7 @@ function summary(proposal: Proposal, dropped: ReadonlySet<string>): string {
 }
 
 function codeBox(view: InboxView, proposal: Proposal): string {
-  if (proposal.state !== 'pending') return '';
+  if (!underReview(proposal)) return '';
   const action = esc(proposalHref(proposal.id));
   if (view.code) {
     return [
@@ -345,6 +347,9 @@ function intro(proposal: Proposal, now: number): string {
     return `${who} proposed this from T3 ${when}.${under} Edit titles, drop what you don't want, then approve. Nothing exists in GitHub until you approve.`;
   }
   if (proposal.state === 'rejected') return `${who} proposed this ${when}. It was rejected.`;
+  if (underReview(proposal)) {
+    return `${who} proposed this ${when}.${under} You approved part of it; the items you withheld still wait for you. Approve them, edit them or send them back.`;
+  }
   return `${who} proposed this ${when}.${under} Approved items are created in GitHub; sent-back items wait for ${who}.`;
 }
 
@@ -418,7 +423,7 @@ function renderDialog(view: InboxView, proposal: Proposal): string {
 }
 
 function renderProposal(view: InboxView, proposal: Proposal): string {
-  const editable = proposal.state === 'pending';
+  const editable = underReview(proposal);
   const plan = approvalPlan(proposal, view.dropped);
   const dropped = new Set(plan.dropped);
   const action = esc(proposalHref(proposal.id));
@@ -431,7 +436,7 @@ function renderProposal(view: InboxView, proposal: Proposal): string {
   ].join('');
   const error = view.error && !view.confirm ? `<p class="ib-msg err" role="alert">${esc(view.error)}</p>` : '';
   const hint = editable
-    ? 'Edit titles inline. Drop what you don\'t want. Tick items to send them back.'
+    ? 'Edit titles inline. Drop what you don\'t want. Tick items to send them back or hold them out of an approval.'
     : '';
   const bar = [
     '<div class="ib-bar">',
@@ -444,8 +449,9 @@ function renderProposal(view: InboxView, proposal: Proposal): string {
     '</div>',
   ].join('');
   const rows = `<div class="nodes">${renderRows(view, proposal, editable)}</div>`;
+  const writing = progress(view, proposal);
   if (!editable) {
-    return `<section class="ib-main" aria-label="Proposal">${head}${progress(view, proposal)}${error}${bar}${rows}</section>`;
+    return `<section class="ib-main" aria-label="Proposal">${head}${writing}${error}${bar}${rows}</section>`;
   }
   const foot = [
     '<div class="ib-foot">',
@@ -456,7 +462,7 @@ function renderProposal(view: InboxView, proposal: Proposal): string {
     '</div>',
   ].join('');
   return [
-    `<section class="ib-main" aria-label="Proposal">${head}${error}`,
+    `<section class="ib-main" aria-label="Proposal">${head}${writing}${error}`,
     `<form class="ib-form" method="post" action="${action}" data-proposal>`,
     csrfField(view.csrf),
     bar, rows, foot,
