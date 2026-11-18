@@ -490,3 +490,139 @@ test('withheld subtrees keep parent-child integrity and stay open to send-back a
   assert.deepEqual(status(), { p: 'approved', f1: 'approved', t1: 'approved', t2: 'approved', f2: 'approved', t3: 'approved' });
   assert.deepEqual(kicked, [id, id]);
 });
+
+test('details pane edits description, steps, base, depends on, sprint and comment, persisted in the store', async t => {
+  const { store, authed } = await fixture(t);
+  store.upsertIssue({
+    ref: `${REPO}#11`, nodeId: 'n11', type: 'Task', title: 'other', state: 'open', parent: null,
+    iteration: { id: 'it_2', title: 'Sprint 2' }, updatedAt: '2026-11-18T00:00:00Z',
+  });
+  const id = store.createProposal({
+    agent: 'Claude',
+    nodes: [
+      { key: 'p', repo: REPO, type: 'Phase', title: 'v2' },
+      { key: 'f1', parentKey: 'p', repo: REPO, type: 'Feature', title: 'board-polish', branch: 'feature/board-polish/board-polish' },
+      { key: 't1', parentKey: 'f1', repo: REPO, type: 'Task', title: 'dark-theme', body: 'Old <b>body</b>', branch: 'feature/board-polish/dark-theme' },
+    ],
+  }).id;
+  const { csrf, post, get } = await authed();
+  const node = (key: string) => store.getProposal(id)!.nodes.find(n => n.key === key)!;
+
+  // Selecting a row saves titles and opens its details.
+  const sel = await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'sel:t1'], ['title:t1', 'dark-mode']]);
+  assert.equal(sel.status, 303);
+  assert.equal(sel.headers.get('location'), `/inbox/${id}?sel=t1`);
+  assert.equal(node('t1').title, 'dark-mode');
+  let html = await (await get(`/inbox/${id}?sel=t1`)).text();
+  assert.ok(html.includes('class="app inbox has-detail"'));
+  assert.ok(html.includes('aria-label="Item details"'));
+  assert.ok(html.includes('>Old &#60;b&#62;body&#60;/b&#62;</textarea>'));
+  assert.ok(html.includes('name="base" value="feature/board-polish/board-polish"'));
+  assert.ok(html.includes('<option value="Sprint 2">Sprint 2</option>'));
+  assert.ok(html.includes('Comment for Claude'));
+  assert.match(html, /class="node lvl-task d2 sel"/);
+
+  const saved = await post(`/inbox/${id}`, [
+    ['csrf', csrf], ['op', 'details'], ['key', 't1'], ['sel', 't1'], ['body', 'Follow the tokens.\r\nBoth themes.'],
+    ['steps', '1'], ['step', 'Map tokens'], ['step', '  '], ['step', 'Check contrast'],
+    ['base', 'feature/board-polish/board-polish'], ['deps', '#keyboard-nav'], ['sprint', 'Sprint 2'], ['note', 'Use system setting'],
+  ]);
+  assert.equal(saved.status, 303);
+  assert.equal(saved.headers.get('location'), `/inbox/${id}?sel=t1`);
+  let t1 = node('t1');
+  assert.equal(t1.body, 'Follow the tokens.\nBoth themes.');
+  assert.deepEqual(t1.steps, ['Map tokens', 'Check contrast']);
+  assert.equal(t1.baseBranch, null, 'the conventional base is not stored as an override');
+  assert.equal(t1.dependsOn, '#keyboard-nav');
+  assert.equal(t1.iteration, 'Sprint 2');
+  assert.equal(t1.draftNote, 'Use system setting');
+
+  // Without JS, Add step and Remove step are submit buttons on the same form.
+  const fields: [string, string][] = [['csrf', csrf], ['key', 't1'], ['steps', '1'], ['step', 'Map tokens'], ['step', 'Check contrast'], ['base', 'main']];
+  assert.equal((await post(`/inbox/${id}`, [...fields, ['op', 'step-add']])).status, 303);
+  assert.deepEqual(node('t1').steps, ['Map tokens', 'Check contrast', 'New step']);
+  assert.equal(node('t1').baseBranch, 'main');
+  assert.equal((await post(`/inbox/${id}`, [...fields, ['op', 'step-del:0']])).status, 303);
+  assert.deepEqual(node('t1').steps, ['Check contrast']);
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['key', 't1'], ['steps', '1'], ['op', 'details'], ['deps', 'none']])).status, 303);
+  t1 = node('t1');
+  assert.deepEqual(t1.steps, []);
+  assert.equal(t1.dependsOn, null);
+
+  // Bad input is refused and changes nothing.
+  const bad = await post(`/inbox/${id}`, [['csrf', csrf], ['key', 't1'], ['op', 'details'], ['base', 'not a branch!']]);
+  assert.equal(bad.status, 409);
+  assert.match(await bad.text(), /Base branch must be a branch name/);
+  assert.equal(node('t1').baseBranch, 'main');
+  assert.equal((await post(`/inbox/${id}`, [['key', 't1'], ['op', 'details'], ['body', 'forged']])).status, 403);
+  assert.equal(node('t1').body, 'Follow the tokens.\nBoth themes.');
+
+  // The draft comment survives a reload and tags its row.
+  html = await (await get(`/inbox/${id}`)).text();
+  assert.match(html, /data-key="t1"[^]*?<span class="tag" title="Use system setting" data-note-tag>Comment<\/span>/);
+  assert.match(html, /data-key="f1"[^]*?data-note-tag hidden>Comment/);
+});
+
+test('draft comments autosave, prefill the send-back dialog, and clear once sent', async t => {
+  const { store, authed } = await fixture(t);
+  const id = propose(store).id;
+  const { csrf, post } = await authed();
+  const node = (key: string) => store.getProposal(id)!.nodes.find(n => n.key === key)!;
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'details'], ['key', 't2'], ['note', 'Split it']])).status, 303);
+  // The dialog's own autosave: per-item comments and the whole-proposal note.
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'notes'], ['note:t3', 'Later'], ['note', 'Keep v2 small']])).status, 303);
+  assert.equal(node('t3').draftNote, 'Later');
+  assert.equal(store.getProposal(id)!.draftNote, 'Keep v2 small');
+
+  const review = await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'review'], ['tick', 't2'], ['tick', 't3']]);
+  const dialog = await review.text();
+  assert.ok(dialog.includes('name="note:t2" rows="2" required maxlength="4000" placeholder="What should change in this item?" aria-label="Comment for keyboard-nav">Split it</textarea>'));
+  assert.ok(dialog.includes('aria-label="Comment for phone-push">Later</textarea>'));
+  assert.ok(dialog.includes('placeholder="Applies to every item sent back">Keep v2 small</textarea>'));
+
+  // Backing out of an item keeps what was typed for it as a draft.
+  assert.equal((await post(`/inbox/${id}/send-back`, [['csrf', csrf], ['key', 't2'], ['key', 't3'], ['note:t2', 'Split it in two'], ['note:t3', 'Later'], ['untick', 't3']])).status, 200);
+  assert.equal(node('t2').draftNote, 'Split it in two');
+  assert.equal(node('t3').draftNote, 'Later');
+
+  const sent = await post(`/inbox/${id}/send-back`, [['csrf', csrf], ['key', 't2'], ['note:t2', 'Split it in two'], ['note', 'Keep v2 small']]);
+  assert.equal(sent.status, 303);
+  assert.equal(node('t2').status, 'sent_back');
+  assert.equal(node('t2').draftNote, null);
+  assert.equal(node('t3').draftNote, 'Later');
+  assert.equal(store.getProposal(id)!.draftNote, null);
+  assert.deepEqual(store.getFeedback(id).comments.map(c => [c.nodeKey, c.body]), [['t2', 'Split it in two'], [null, 'Keep v2 small']]);
+});
+
+test('details of approved items are read-only and show the created issue', async t => {
+  const { store, authed } = await fixture(t);
+  const id = propose(store).id;
+  const { csrf, post, get } = await authed();
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 't3']])).status, 303);
+  store.recordCreatedIssue(id, 't1', { number: 77, nodeId: 'I_77' });
+  const html = await (await get(`/inbox/${id}?sel=t1`)).text();
+  assert.ok(html.includes('aria-label="Item details"'));
+  assert.ok(!html.includes('data-details'));
+  assert.ok(html.includes(`href="https://github.com/${REPO}/issues/77"`));
+  // The withheld item keeps an editable pane.
+  assert.ok((await (await get(`/inbox/${id}?sel=t3`)).text()).includes('data-details'));
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'details'], ['key', 't1'], ['body', 'late edit']])).status, 409);
+});
+
+test('sending back the last withheld items ends the review and still records the feedback', async t => {
+  const { writer, kicked } = fakeWriter();
+  const { store, authed } = await fixture(t, writer);
+  const id = propose(store).id;
+  const { csrf, post, get } = await authed();
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 't3']])).status, 303);
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'notes'], ['note', 'One more pass']])).status, 303);
+  const sent = await post(`/inbox/${id}/send-back`, [['csrf', csrf], ['key', 't3'], ['note:t3', 'Out of scope'], ['note', 'One more pass']]);
+  assert.equal(sent.status, 303);
+  const proposal = store.getProposal(id)!;
+  assert.equal(proposal.nodes.find(n => n.key === 't3')!.status, 'sent_back');
+  assert.equal(proposal.draftNote, null);
+  assert.deepEqual(store.getFeedback(id).comments.map(c => [c.nodeKey, c.body]), [['t3', 'Out of scope'], [null, 'One more pass']]);
+  // Nothing is left for Por, so the proposal moves to Earlier until the agent resubmits.
+  assert.ok((await (await get('/inbox')).text()).includes('Waiting for you · 0'));
+  assert.deepEqual(kicked, [id]);
+});

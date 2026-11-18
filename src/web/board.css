@@ -240,6 +240,31 @@ a.brand:hover { color: var(--ink); }
 .dlg-act { display: flex; justify-content: flex-end; gap: 8px; }
 .dlg-act .btn { height: 28px; padding: 0 14px; font-size: 13px; text-decoration: none; }
 
+/* Inbox details pane ("Item details") */
+.node.sel { box-shadow: inset 3px 0 0 var(--accent); background: var(--bg-selected); }
+.ib-detail { flex: 1 1 360px; max-width: 420px; min-width: 0; align-self: flex-start; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-content); overflow: hidden; }
+.dt-bar { display: none; }
+.dt-head { padding: 14px 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-sidebar); display: flex; flex-direction: column; gap: 6px; }
+.dt-head h2 { margin: 0; font: 600 17px/22px var(--display); overflow-wrap: anywhere; }
+.dt-head .br { flex: 0 1 auto; }
+.dt-form { margin: 0; }
+.dt-save { display: flex; align-items: center; gap: 8px; padding: 10px 16px 0; }
+.dt-save .meta:empty { display: none; }
+.js .dt-save .save { display: none; }
+.js .dt-save { padding: 6px 16px 0; min-height: 0; }
+.ib-detail .kv { align-items: center; gap: 8px 12px; }
+.ib-detail .kv dd .fld { height: 28px; padding: 0 8px; }
+.br-in { font: 400 12px/18px var(--mono); }
+.step { display: flex; align-items: center; gap: 8px; }
+.step .fld { height: 28px; padding: 0 8px; }
+.dt-add { align-self: flex-start; }
+.dt-kid { font-size: 13px; overflow-wrap: anywhere; }
+.dt-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dt-steps { margin: 0; padding-left: 18px; }
+.dt-act { display: flex; justify-content: flex-end; gap: 8px; }
+.tick-btn { display: none; }
+.js .tick-btn { display: inline-flex; }
+
 /* Phone ("Board · iPhone") */
 @media (max-width: 720px) {
   .top { padding: 12px 16px; gap: 12px; border-bottom: 0; }
@@ -308,6 +333,15 @@ a.brand:hover { color: var(--ink); }
   .ib-foot .grow { display: none; }
   .ib-foot .btn, .dlg-act .btn { height: 44px; flex: 1 1 0; justify-content: center; }
   .scrim { padding: 0; align-items: flex-end; }
+  /* Details open on phone: the pane takes the screen, with a back link to the proposal. */
+  .inbox.has-detail .ib-list, .inbox.has-detail .ib-main { display: none; }
+  .ib-detail { flex-basis: 100%; max-width: none; border: 0; border-radius: 0; }
+  .has-detail .dt-bar { display: flex; align-items: center; padding: 8px; background: var(--bg-window); }
+  .dt-close { display: none; }
+  .dt-head h2 { font: 600 22px/28px var(--display); }
+  .ib-detail .kv dd .fld, .step .fld { height: 36px; font-size: 15px; }
+  .ib-detail .fld { font-size: 15px; }
+  .dt-act .btn, .dt-add { height: 44px; }
   .dlg { max-height: 90vh; border-radius: 12px 12px 0 0; padding: 16px; }
 }
 

@@ -430,3 +430,45 @@ it('the approve tool starts the write and get_proposal reports progress', async 
   assert.deepEqual({ running: view.write.running, error: view.write.error }, { running: false, error: null });
   assert.match(github.byTitle('Board UI').body, /Branch: `feature\/board-ui\/board-ui`/);
 });
+
+it('writes inbox detail edits and holds withheld items until a later approval', async (t) => {
+  const { store, github, writer, errors } = setup(t);
+  const id = store.createProposal({ agent: 'claude', nodes: TREE }).id;
+  // Por's edits in the inbox details pane, saved before approval.
+  store.renameProposalNode(id, 'task-a', 'Write issues');
+  store.updateProposalNodeDetails(id, 'task-a', {
+    body: 'Create issues in order.', steps: ['Parents first', ' ', 'Link sub-issues'],
+    baseBranch: 'feature/mcp/mcp', dependsOn: '#old', iteration: 'iter_0',
+  });
+  store.setDraftNote(id, 'task-c', 'Not yet');
+  // Withhold task-c: it stays a draft while the rest is written.
+  store.saveApproveCode(id, 'CODE42', new Date(Date.now() + 60_000));
+  assert.deepEqual(store.approveProposal(id, 'CODE42', new Date(), { withhold: ['task-c'] }), { ok: true });
+  await writer.kick(id);
+
+  assert.deepEqual(errors, []);
+  const taskA = github.byTitle('Write issues');
+  assert.equal(taskA.body, [
+    'Create issues in order.',
+    '## Steps\n\n- [ ] Parents first\n- [ ] Link sub-issues',
+    'Branch: `feature/mcp/write`',
+    'Base: `feature/mcp/mcp`',
+    'Depends on: #old',
+    writeMarker(id, 'task-a'),
+  ].join('\n\n'));
+  assert.equal(taskA.items[0]!.iterationId, 'iter_0');
+  assert.deepEqual(github.issues.map(issue => issue.title), ['Phase 2', 'MCP', 'Write issues', 'Old']);
+  assert.equal(nodeOf(store, id, 'task-c').status, 'draft');
+  assert.equal(nodeOf(store, id, 'task-c').draftNote, 'Not yet');
+  assert.equal(store.getProposal(id)!.state, 'done');
+
+  // The withheld item is approved later and lands under its already-created Feature.
+  const code = issueApproveCode(store, id);
+  assert.deepEqual(store.approveProposal(id, code), { ok: true });
+  await writer.kick(id);
+  assert.deepEqual(errors, []);
+  assert.equal(github.issues.length, 5);
+  assert.equal(github.byTitle('Later').parentId, github.byTitle('MCP').id);
+  assert.equal(store.getProposal(id)!.state, 'done');
+  assert.throws(() => issueApproveCode(store, id), /only pending proposals/);
+});

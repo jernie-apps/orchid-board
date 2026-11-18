@@ -117,6 +117,22 @@ export interface ProposalNode {
   status: NodeStatus;
   issueNumber: number | null;
   issueNodeId: string | null;
+  /** Checklist Por edited in the inbox; null when never edited. */
+  steps: string[] | null;
+  /** Base branch override; null means the convention (Feature: develop, Task: its Feature's branch). */
+  baseBranch: string | null;
+  dependsOn: string | null;
+  /** Por's unsent comment for this item. */
+  draftNote: string | null;
+}
+
+/** Inbox edits to a node's issue content. Omitted fields stay as they are. */
+export interface NodeDetails {
+  body?: string;
+  steps?: readonly string[] | null;
+  baseBranch?: string | null;
+  dependsOn?: string | null;
+  iteration?: string | null;
 }
 
 export interface Proposal {
@@ -127,6 +143,8 @@ export interface Proposal {
   state: ProposalState;
   createdAt: string;
   updatedAt: string;
+  /** Por's unsent note for the whole proposal. */
+  draftNote: string | null;
   /** Parents before children, in submitted order. */
   nodes: ProposalNode[];
 }
@@ -565,11 +583,13 @@ export class Store {
   getProposal(id: string): Proposal | null {
     const row = this.db.prepare('SELECT * FROM proposals WHERE id = ?').get(id);
     if (!row) return null;
+    const reviews = this.#reviews(id);
     const nodes = this.db
       .prepare('SELECT * FROM proposal_nodes WHERE proposal_id = ? ORDER BY position')
       .all(id)
-      .map(toProposalNode);
-    return toProposal(row, nodes);
+      .map(toProposalNode)
+      .map(node => ({ ...node, ...reviews.get(node.key) }));
+    return { ...toProposal(row, nodes), draftNote: this.getMeta(proposalNoteKey(id)) };
   }
 
   listProposals(state?: ProposalState): Proposal[] {
@@ -593,11 +613,12 @@ export class Store {
     if (Number(changes) === 0) throw new StoreError(`no node "${key}" in proposal ${id}`);
   }
 
-  /** Mark a node sent back and record the reviewer's comment. */
+  /** Mark a node sent back and record the reviewer's comment. The sent comment replaces any draft. */
   sendBack(id: string, key: string, comment: { author: string; body: string }, now: Date = this.#clock()): void {
     tx(this.db, () => {
       this.setNodeStatus(id, key, 'sent_back');
       this.addFeedback(id, key, comment.author, comment.body, now);
+      this.#patchReview(id, key, { draftNote: null });
     });
   }
 
@@ -640,6 +661,8 @@ export class Store {
         if (!row) throw new StoreError(`no node "${node.key}" in proposal ${id}`);
         if (row.status !== 'sent_back') throw new StoreError(`node "${node.key}" was not sent back`);
         update.run(node.repo, node.type, node.title, node.body ?? '', node.branch ?? null, node.iteration ?? null, id, node.key);
+        // The agent's rewrite replaces the content Por reviewed, including his inbox edits.
+        this.#clearReview(id, [node.key]);
       }
       this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
       if (nodes.length > 0) this.#invalidateApproveCode(id);
@@ -681,6 +704,7 @@ export class Store {
       const replacements = prepare(proposal, retained);
       const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
       for (const key of removed) remove.run(id, key);
+      this.#clearReview(id, removed);
       const move = this.db.prepare('UPDATE proposal_nodes SET position = ? WHERE proposal_id = ? AND key = ?');
       let position = 0;
       for (const node of proposal.nodes) {
@@ -740,6 +764,93 @@ export class Store {
       this.db.prepare('UPDATE proposal_nodes SET title = ? WHERE proposal_id = ? AND key = ?').run(clean, id, key);
       this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
     });
+  }
+
+  /**
+   * Edit a draft node's issue content from the inbox details pane. Saved at once, so whichever path
+   * approves the proposal (web or MCP code) hands the edited content to the GitHub writer.
+   */
+  updateProposalNodeDetails(id: string, key: string, details: NodeDetails, now: Date = this.#clock()): void {
+    const review: ReviewPatch = {};
+    if (details.body !== undefined && details.body.length > MAX_BODY) throw new StoreError(`description must be at most ${MAX_BODY} characters`);
+    if (details.steps !== undefined) {
+      const steps = details.steps === null ? null : details.steps.map(step => step.trim()).filter(step => step !== '');
+      if (steps && steps.length > MAX_STEPS) throw new StoreError(`at most ${MAX_STEPS} steps`);
+      if (steps?.some(step => step.length > MAX_TITLE || /[\r\n]/.test(step))) throw new StoreError(`each step must be one line of at most ${MAX_TITLE} characters`);
+      review.steps = steps;
+    }
+    if (details.baseBranch !== undefined) {
+      const base = blankToNull(details.baseBranch);
+      if (base !== null && !/^[A-Za-z0-9._/-]{1,200}$/.test(base)) throw new StoreError('base branch must be a branch name');
+      review.baseBranch = base;
+    }
+    if (details.dependsOn !== undefined) {
+      const deps = blankToNull(details.dependsOn);
+      if (deps !== null && (deps.length > MAX_TITLE || /[\r\n]/.test(deps))) throw new StoreError(`depends on must be one line of at most ${MAX_TITLE} characters`);
+      review.dependsOn = deps;
+    }
+    const iteration = details.iteration === undefined ? undefined : blankToNull(details.iteration);
+    if (iteration && iteration.length > MAX_TITLE) throw new StoreError('sprint name is too long');
+    tx(this.db, () => {
+      this.#reviewableNode(id, key);
+      if (details.body !== undefined) {
+        this.db.prepare('UPDATE proposal_nodes SET body = ? WHERE proposal_id = ? AND key = ?').run(details.body.trim(), id, key);
+      }
+      if (iteration !== undefined) {
+        this.db.prepare('UPDATE proposal_nodes SET iteration = ? WHERE proposal_id = ? AND key = ?').run(iteration, id, key);
+      }
+      this.#patchReview(id, key, review);
+      this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
+    });
+  }
+
+  /** Save Por's unsent comment for a draft node (`key`) or for the whole proposal (`key` null). Blank clears it. */
+  setDraftNote(id: string, key: string | null, note: string): void {
+    if (note.length > MAX_NOTE) throw new StoreError(`comments must be at most ${MAX_NOTE} characters`);
+    const value = note.trim() === '' ? null : note;
+    tx(this.db, () => {
+      if (key === null) {
+        const proposal = this.getProposal(id);
+        if (!proposal) throw new StoreError(`no proposal ${id}`);
+        // Clearing is always allowed: sending back the last withheld items ends the review.
+        if (value !== null && !underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
+        if (value === null) this.#deleteMeta(proposalNoteKey(id));
+        else this.setMeta(proposalNoteKey(id), value);
+      } else {
+        this.#reviewableNode(id, key);
+        this.#patchReview(id, key, { draftNote: value });
+      }
+    });
+  }
+
+  // Inbox review data (steps, base branch, depends-on, draft comments) lives in meta, one JSON row per
+  // node, like dropped keys: no migration, and getProposal folds it into ProposalNode for the writer.
+
+  #reviews(id: string): Map<string, Review> {
+    const prefix = reviewPrefix(id);
+    const rows = this.db.prepare('SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?').all(prefix.length, prefix);
+    return new Map(rows.map(row => [String(row.key).slice(prefix.length), parseReview(String(row.value))]));
+  }
+
+  #patchReview(id: string, key: string, patch: ReviewPatch): void {
+    const metaKey = reviewPrefix(id) + key;
+    const raw = this.getMeta(metaKey);
+    const review: Record<string, unknown> = raw === null ? {} : { ...parseReview(raw) };
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      if (value === null) delete review[field];
+      else review[field] = value;
+    }
+    if (Object.keys(review).length === 0) this.#deleteMeta(metaKey);
+    else this.setMeta(metaKey, JSON.stringify(review));
+  }
+
+  #clearReview(id: string, keys: Iterable<string>): void {
+    for (const key of keys) this.#deleteMeta(reviewPrefix(id) + key);
+  }
+
+  #deleteMeta(key: string): void {
+    this.db.prepare('DELETE FROM meta WHERE key = ?').run(key);
   }
 
   /**
@@ -849,6 +960,7 @@ export class Store {
       const plan = approvalPlan(proposal, this.droppedNodeKeys(id), withhold);
       const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
       for (const key of plan.dropped) remove.run(id, key);
+      this.#clearReview(id, plan.dropped);
       for (const key of plan.approve) this.setNodeStatus(id, key, 'approved');
       if (plan.approve.length === 0) throw new StoreError('proposal has no draft nodes ready for approval');
       this.db.prepare('DELETE FROM meta WHERE key = ?').run(droppedKey(id));
@@ -859,6 +971,48 @@ export class Store {
 }
 
 const MAX_TITLE = 256;
+const MAX_BODY = 20_000;
+const MAX_STEPS = 50;
+const MAX_NOTE = 4000;
+
+function blankToNull(value: string | null): string | null {
+  const trimmed = value?.trim() ?? '';
+  return trimmed === '' ? null : trimmed;
+}
+
+interface Review {
+  steps?: string[];
+  baseBranch?: string;
+  dependsOn?: string;
+  draftNote?: string;
+}
+/** null removes a field. */
+type ReviewPatch = { [K in keyof Review]?: Review[K] | null };
+
+function reviewPrefix(id: string): string {
+  return `proposal.review:${id}:`;
+}
+
+function proposalNoteKey(id: string): string {
+  return `proposal.note:${id}`;
+}
+
+function parseReview(raw: string): Review {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null) return {};
+  const record = parsed as Record<string, unknown>;
+  const review: Review = {};
+  if (Array.isArray(record.steps)) review.steps = record.steps.filter((step): step is string => typeof step === 'string');
+  for (const field of ['baseBranch', 'dependsOn', 'draftNote'] as const) {
+    if (typeof record[field] === 'string') review[field] = record[field];
+  }
+  return review;
+}
 
 function droppedKey(id: string): string {
   return `proposal.dropped:${id}`;
@@ -973,6 +1127,7 @@ function toProposal(row: Row, nodes: ProposalNode[]): Proposal {
     state: String(row.state) as ProposalState,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    draftNote: null,
     nodes,
   };
 }
@@ -991,6 +1146,10 @@ function toProposalNode(row: Row): ProposalNode {
     status: String(row.status) as NodeStatus,
     issueNumber: row.issue_number === null ? null : Number(row.issue_number),
     issueNodeId: strOrNull(row.issue_node_id),
+    steps: null,
+    baseBranch: null,
+    dependsOn: null,
+    draftNote: null,
   };
 }
 

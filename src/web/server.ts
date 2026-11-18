@@ -6,7 +6,9 @@ import type { AddressInfo } from 'node:net';
 import type { Secret } from '../secrets.ts';
 import { underReview, type Store } from '../store/store.ts';
 import type { SyncEvents } from '../sync/poller.ts';
-import { applyProposalPost, applySendBack, isProposalId, renderInbox, type InboxOutcome, type InboxState, type InboxWriter } from './inbox.ts';
+import {
+  applyProposalPost, applySendBack, isProposalId, renderInbox, selParam, type InboxOutcome, type InboxState, type InboxWriter,
+} from './inbox.ts';
 import { parseQuery, renderApp, renderLogin, renderPage, type BoardQuery, type BoardView } from './render.ts';
 
 /** What the board needs from the poller: change events and the last successful poll. */
@@ -315,8 +317,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           ? proposals.filter(p => underReview(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
           : store.getProposal(proposalId);
         if (!selected && proposalId !== null) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+        const sprints = [...new Set(store.listIssues().flatMap(issue => (issue.iteration ? [issue.iteration.title] : [])))].sort();
         const html = renderInbox({
+          sel: selParam(url.searchParams.get('sel')),
           ...state,
+          sprints,
           proposals,
           selected,
           dropped: selected ? store.droppedNodeKeys(selected.id) : [],
