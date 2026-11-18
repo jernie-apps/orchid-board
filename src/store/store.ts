@@ -61,6 +61,13 @@ export interface Claim {
   expiresAt: string;
 }
 
+/** An agent's local "done" signal for a task. Not written to GitHub. */
+export interface DoneReport {
+  task: string;
+  agent: string;
+  at: string;
+}
+
 export interface TreeNode extends Issue {
   children: TreeNode[];
   prs: Pr[];
@@ -133,7 +140,7 @@ export interface Feedback {
   createdAt: string;
 }
 
-export type ApproveResult = { ok: true } | { ok: false; reason: 'missing' | 'wrong' | 'expired' | 'used' };
+export type ApproveResult = { ok: true } | { ok: false; reason: 'missing' | 'wrong' | 'expired' | 'used' | 'locked' };
 
 export class StoreError extends Error {
   override name = 'StoreError';
@@ -161,6 +168,7 @@ export interface StoreOptions {
 type Row = Record<string, SQLOutputValue>;
 
 const RANK: Record<IssueType, number> = { Phase: 0, Feature: 1, Task: 2 };
+const MAX_APPROVE_ATTEMPTS = 5;
 
 export function openStore(path: string, options: StoreOptions = {}): Store {
   return new Store(openDb(path), options);
@@ -432,6 +440,9 @@ export class Store {
            ON CONFLICT(task) DO UPDATE SET agent = excluded.agent, since = excluded.since, expires_at = excluded.expires_at`,
         )
         .run(claim.task, claim.agent, claim.since, claim.expiresAt);
+      // A new claim means work restarted: drop any earlier done signal.
+      const { repo, number } = parseRef(task);
+      this.db.prepare('UPDATE issues SET done_by = NULL, done_at = NULL WHERE repo = ? AND number = ?').run(repo, number);
       return claim;
     });
   }
@@ -471,6 +482,30 @@ export class Store {
     return Number(this.db.prepare('DELETE FROM claims WHERE expires_at <= ?').run(now.toISOString()).changes);
   }
 
+  /**
+   * Record that `agent` reported the task done and drop its claim. Local signal only.
+   * Throws ClaimConflictError if another agent holds an active claim, StoreError if the task is not cached.
+   */
+  markDone(task: string, agent: string, now: Date = this.#clock()): DoneReport {
+    const { repo, number } = parseRef(task);
+    if (agent === '') throw new StoreError('agent must be non-empty');
+    return tx(this.db, () => {
+      if (!this.getIssue(task)) throw new StoreError(`unknown task ${task}`);
+      this.release(task, agent, now);
+      const at = now.toISOString();
+      this.db.prepare('UPDATE issues SET done_by = ?, done_at = ? WHERE repo = ? AND number = ?').run(agent, at, repo, number);
+      return { task, agent, at };
+    });
+  }
+
+  /** The latest done signal for a task, or null. */
+  getDone(task: string): DoneReport | null {
+    const { repo, number } = parseRef(task);
+    const row = this.db.prepare('SELECT done_by, done_at FROM issues WHERE repo = ? AND number = ?').get(repo, number);
+    if (!row || row.done_by === null || row.done_at === null) return null;
+    return { task, agent: String(row.done_by), at: String(row.done_at) };
+  }
+
   #claimRow(task: string): Claim | null {
     const row = this.db.prepare('SELECT * FROM claims WHERE task = ?').get(task);
     return row ? toClaim(row) : null;
@@ -501,26 +536,30 @@ export class Store {
       this.db
         .prepare("INSERT INTO proposals (id, parent, agent, state, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)")
         .run(id, parent, input.agent ?? null, at, at);
-      const insert = this.db.prepare(
-        `INSERT INTO proposal_nodes (proposal_id, key, parent_key, position, repo, type, title, body, branch, iteration, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
-      );
-      input.nodes.forEach((node, position) => {
-        insert.run(
-          id,
-          node.key,
-          node.parentKey ?? null,
-          position,
-          node.repo,
-          node.type,
-          node.title,
-          node.body ?? '',
-          node.branch ?? null,
-          node.iteration ?? null,
-        );
-      });
+      this.#insertProposalNodes(id, input.nodes, 0);
     });
     return this.getProposal(id)!;
+  }
+
+  #insertProposalNodes(id: string, nodes: readonly ProposalNodeInput[], offset: number): void {
+    const insert = this.db.prepare(
+      `INSERT INTO proposal_nodes (proposal_id, key, parent_key, position, repo, type, title, body, branch, iteration, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
+    );
+    nodes.forEach((node, index) => {
+      insert.run(
+        id,
+        node.key,
+        node.parentKey ?? null,
+        offset + index,
+        node.repo,
+        node.type,
+        node.title,
+        node.body ?? '',
+        node.branch ?? null,
+        node.iteration ?? null,
+      );
+    });
   }
 
   getProposal(id: string): Proposal | null {
@@ -603,8 +642,72 @@ export class Store {
         update.run(node.repo, node.type, node.title, node.body ?? '', node.branch ?? null, node.iteration ?? null, id, node.key);
       }
       this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
+      if (nodes.length > 0) this.#invalidateApproveCode(id);
     });
     return this.getProposal(id)!;
+  }
+
+  /** Replace entire sent-back subtrees, preserving the other nodes and their order. */
+  resubmitSubtrees(
+    id: string,
+    rootKeys: ReadonlySet<string>,
+    prepare: (proposal: Proposal, retained: readonly ProposalNode[]) => ReadonlyMap<string, readonly ProposalNodeInput[]>,
+    now: Date = this.#clock(),
+  ): Proposal {
+    return tx(this.db, () => {
+      const proposal = this.getProposal(id);
+      if (!proposal) throw new StoreError(`no proposal ${id}`);
+      if (proposal.state === 'rejected') throw new StoreError('a rejected proposal cannot be resubmitted');
+      if (rootKeys.size === 0) throw new StoreError('resubmission needs at least one sent-back node');
+      const removed = new Set<string>();
+      const retained: ProposalNode[] = [];
+      for (const node of proposal.nodes) {
+        const underReplacement = node.parentKey !== null && removed.has(node.parentKey);
+        if (rootKeys.has(node.key)) {
+          if (node.status !== 'sent_back') throw new StoreError(`node "${node.key}" was not sent back`);
+          if (underReplacement) throw new StoreError(`include "${node.key}" inside its replacement subtree`);
+        } else if (!underReplacement) {
+          retained.push(node);
+          continue;
+        }
+        if (node.status === 'approved' || node.status === 'created') {
+          throw new StoreError(`cannot replace ${node.status} node "${node.key}"`);
+        }
+        removed.add(node.key);
+      }
+      for (const key of rootKeys) {
+        if (!removed.has(key)) throw new StoreError(`no node "${key}" in proposal ${id}`);
+      }
+      const replacements = prepare(proposal, retained);
+      const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
+      for (const key of removed) remove.run(id, key);
+      const move = this.db.prepare('UPDATE proposal_nodes SET position = ? WHERE proposal_id = ? AND key = ?');
+      let position = 0;
+      for (const node of proposal.nodes) {
+        const replacement = replacements.get(node.key);
+        if (rootKeys.has(node.key)) {
+          if (!replacement?.length || replacement[0]!.key !== node.key || replacement[0]!.parentKey !== node.parentKey) {
+            throw new StoreError(`replacement must keep the key and parent of "${node.key}"`);
+          }
+          this.#insertProposalNodes(id, replacement, position);
+          position += replacement.length;
+        } else if (!removed.has(node.key)) {
+          if (node.position !== position) move.run(position, id, node.key);
+          position++;
+        }
+      }
+      this.setProposalState(id, 'pending', now);
+      this.#invalidateApproveCode(id);
+      return this.getProposal(id)!;
+    });
+  }
+
+  /** A branch recorded by Orchid when it created the cached issue. */
+  getCreatedIssueBranch(issueNodeId: string): string | null {
+    const row = this.db
+      .prepare('SELECT branch FROM proposal_nodes WHERE issue_node_id = ? AND branch IS NOT NULL LIMIT 1')
+      .get(issueNodeId);
+    return strOrNull(row?.branch);
   }
 
   /**
@@ -626,6 +729,10 @@ export class Store {
 
   // ---- approve codes ----
 
+  #invalidateApproveCode(id: string): void {
+    this.db.prepare('DELETE FROM approve_codes WHERE proposal_id = ? AND used_at IS NULL').run(id);
+  }
+
   /** Store a new code for a proposal (hash only), replacing any previous one. */
   saveApproveCode(id: string, code: string, expiresAt: Date, now: Date = this.#clock()): void {
     if (code === '') throw new StoreError('approve code must be non-empty');
@@ -634,27 +741,53 @@ export class Store {
       .prepare(
         `INSERT INTO approve_codes (proposal_id, code_hash, created_at, expires_at, used_at) VALUES (?, ?, ?, ?, NULL)
          ON CONFLICT(proposal_id) DO UPDATE SET code_hash = excluded.code_hash, created_at = excluded.created_at,
-           expires_at = excluded.expires_at, used_at = NULL`,
+           expires_at = excluded.expires_at, used_at = NULL, failed_attempts = 0`,
       )
       .run(id, hashCode(id, code), now.toISOString(), expiresAt.toISOString());
   }
 
-  /** Succeeds once for the right, unexpired code. A wrong guess does not burn the code. */
+  /** Succeeds once for the right, unexpired code. The fifth wrong guess burns it. */
   consumeApproveCode(id: string, code: string, now: Date = this.#clock()): ApproveResult {
-    const at = now.toISOString();
-    const hash = hashCode(id, code);
-    const changes = this.db
-      .prepare(
-        `UPDATE approve_codes SET used_at = ?
-         WHERE proposal_id = ? AND code_hash = ? AND used_at IS NULL AND expires_at > ?`,
-      )
-      .run(at, id, hash, at).changes;
-    if (Number(changes) === 1) return { ok: true };
-    const row = this.db.prepare('SELECT code_hash, expires_at, used_at FROM approve_codes WHERE proposal_id = ?').get(id);
-    if (!row) return { ok: false, reason: 'missing' };
-    if (row.used_at !== null) return { ok: false, reason: 'used' };
-    if (row.code_hash !== hash) return { ok: false, reason: 'wrong' };
-    return { ok: false, reason: 'expired' };
+    return tx(this.db, () => {
+      const at = now.toISOString();
+      const row = this.db
+        .prepare('SELECT code_hash, expires_at, used_at, failed_attempts FROM approve_codes WHERE proposal_id = ?')
+        .get(id);
+      if (!row) return { ok: false, reason: 'missing' };
+      if (row.used_at !== null) return { ok: false, reason: 'used' };
+      const attempts = Number(row.failed_attempts);
+      if (attempts >= MAX_APPROVE_ATTEMPTS) return { ok: false, reason: 'locked' };
+      if (String(row.expires_at) <= at) return { ok: false, reason: 'expired' };
+      if (row.code_hash !== hashCode(id, code)) {
+        this.db.prepare('UPDATE approve_codes SET failed_attempts = failed_attempts + 1 WHERE proposal_id = ?').run(id);
+        return { ok: false, reason: attempts + 1 === MAX_APPROVE_ATTEMPTS ? 'locked' : 'wrong' };
+      }
+      this.db.prepare('UPDATE approve_codes SET used_at = ? WHERE proposal_id = ?').run(at, id);
+      return { ok: true };
+    });
+  }
+
+  /** Consume the code and release reviewed draft nodes to the GitHub writer in one transaction. */
+  approveProposal(id: string, code: string, now: Date = this.#clock()): ApproveResult {
+    return tx(this.db, () => {
+      const result = this.consumeApproveCode(id, code, now);
+      if (!result.ok) return result;
+      const proposal = this.getProposal(id)!;
+      if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be approved');
+      const blocked = new Set<string>();
+      let approved = 0;
+      for (const node of proposal.nodes) {
+        if (node.status === 'sent_back' || (node.parentKey !== null && blocked.has(node.parentKey))) {
+          blocked.add(node.key);
+        } else if (node.status === 'draft') {
+          this.setNodeStatus(id, node.key, 'approved');
+          approved++;
+        }
+      }
+      if (approved === 0) throw new StoreError('proposal has no draft nodes ready for approval');
+      this.setProposalState(id, 'approved', now);
+      return result;
+    });
   }
 }
 

@@ -36,6 +36,8 @@ interface RepoPoll {
   /** Epoch ms of the last successful poll, or null before the first. */
   syncedAt: number | null;
   active?: Promise<void>;
+  /** Poll again as soon as the active poll ends. */
+  again?: boolean;
 }
 
 export function createGitHubPoller({ token, ...options }: Omit<PollerOptions, 'createClient'> & { token: Secret }): Poller {
@@ -105,12 +107,34 @@ export class Poller {
     if (this.#stop.signal.aborted) return;
     const active: Promise<void>[] = [];
     for (const repo of this.#repos.values()) {
-      if (!repo.active && this.#now() >= repo.retryAt) {
-        repo.active = this.#pollRepo(repo).finally(() => { repo.active = undefined; });
-      }
+      if (!repo.active && this.#now() >= repo.retryAt) this.#start(repo);
       if (repo.active) active.push(repo.active);
     }
     await Promise.all(active);
+  }
+
+  /**
+   * Poll the given `owner/name` repos (all when omitted) now, e.g. after Orchid wrote to them.
+   * A repo already polling is polled again once that poll ends, so it sees the write.
+   */
+  pollNow(repos?: readonly string[]): void {
+    if (this.#stop.signal.aborted) return;
+    const wanted = repos && new Set(repos.map(repo => repo.toLowerCase()));
+    for (const repo of this.#repos.values()) {
+      if (wanted && !wanted.has(repo.name)) continue;
+      if (repo.active) repo.again = true;
+      else if (this.#now() >= repo.retryAt) this.#start(repo);
+    }
+  }
+
+  #start(repo: RepoPoll): void {
+    repo.active = this.#pollRepo(repo).finally(() => {
+      repo.active = undefined;
+      if (repo.again && !this.#stop.signal.aborted) {
+        repo.again = false;
+        this.#start(repo);
+      }
+    });
   }
 
   async #pollRepo(repo: RepoPoll): Promise<void> {
