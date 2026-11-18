@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+# local state and secrets live in ~/.orchid/board/, never here
+*.db
+*.db-wal
+*.db-shm
+*.token
+*.passphrase
+.env*
+# planning doc kept outside the repo
+Orchid Board build plan.md
