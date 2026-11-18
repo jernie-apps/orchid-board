@@ -608,3 +608,21 @@ test('details of approved items are read-only and show the created issue', async
   assert.ok((await (await get(`/inbox/${id}?sel=t3`)).text()).includes('data-details'));
   assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'details'], ['key', 't1'], ['body', 'late edit']])).status, 409);
 });
+
+test('sending back the last withheld items ends the review and still records the feedback', async t => {
+  const { writer, kicked } = fakeWriter();
+  const { store, authed } = await fixture(t, writer);
+  const id = propose(store).id;
+  const { csrf, post, get } = await authed();
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve'], ['tick', 't3']])).status, 303);
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'notes'], ['note', 'One more pass']])).status, 303);
+  const sent = await post(`/inbox/${id}/send-back`, [['csrf', csrf], ['key', 't3'], ['note:t3', 'Out of scope'], ['note', 'One more pass']]);
+  assert.equal(sent.status, 303);
+  const proposal = store.getProposal(id)!;
+  assert.equal(proposal.nodes.find(n => n.key === 't3')!.status, 'sent_back');
+  assert.equal(proposal.draftNote, null);
+  assert.deepEqual(store.getFeedback(id).comments.map(c => [c.nodeKey, c.body]), [['t3', 'Out of scope'], [null, 'One more pass']]);
+  // Nothing is left for Por, so the proposal moves to Earlier until the agent resubmits.
+  assert.ok((await (await get('/inbox')).text()).includes('Waiting for you · 0'));
+  assert.deepEqual(kicked, [id]);
+});

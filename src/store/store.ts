@@ -812,7 +812,8 @@ export class Store {
       if (key === null) {
         const proposal = this.getProposal(id);
         if (!proposal) throw new StoreError(`no proposal ${id}`);
-        if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
+        // Clearing is always allowed: sending back the last withheld items ends the review.
+        if (value !== null && !underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
         if (value === null) this.#deleteMeta(proposalNoteKey(id));
         else this.setMeta(proposalNoteKey(id), value);
       } else {
