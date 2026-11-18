@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GitHubClient } from '../../src/github/client.ts';
-import { listIssuePullRequests, listIssues } from '../../src/github/queries.ts';
+import { listIssuePullRequests, listIssues, listRepoPullRequests } from '../../src/github/queries.ts';
 import { Secret } from '../../src/secrets.ts';
 import recorded from '../fixtures/github/recorded.json' with { type: 'json' };
 
@@ -49,6 +49,69 @@ function pr(number: number, state: string, isDraft: boolean, check: string | nul
     commits: { nodes: [{ commit: { statusCheckRollup: check === null ? null : { state: check } } }] },
   };
 }
+
+function repoPr(number: number, state: string, body: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ...pr(number, state, false, 'SUCCESS'), id: `pr-${number}`, body, baseRefName: 'feature/core/core',
+    closingIssuesReferences: lastPage([]), ...overrides,
+  };
+}
+
+function repoPrPage<T>(pullRequests: ReturnType<typeof firstPage<T>> | ReturnType<typeof lastPage<T>>) {
+  return { data: { repository: { nameWithOwner: 'companie-apps/orchid-board', pullRequests } } };
+}
+
+const repoPulls = /pullRequests\(first: 50, after: \$cursor, states: \$states,\s+orderBy: \{ field: UPDATED_AT, direction: \$direction \}\)/;
+
+test('lists all PR states and base branches with closing keywords and native links', async () => {
+  const feature = repoPr(16, 'MERGED', 'Closes #6, FIXES: Another-Org/Another.Repo#2\nresolved #6. See #5. Refix #9.');
+  const main = repoPr(21, 'CLOSED', 'See #8', {
+    baseRefName: 'main', closingIssuesReferences: firstPage([phase], 'issues-2'),
+  });
+  const vars = { ...repo, states: null, direction: 'DESC' };
+  const { client, verify } = fakeClient(
+    {
+      operation: 'RepoPullRequests', variables: { ...vars, cursor: null },
+      response: repoPrPage(firstPage([feature], 'prs-2')), selection: repoPulls,
+    },
+    {
+      operation: 'RepoPullRequests', variables: { ...vars, cursor: 'prs-2' },
+      response: repoPrPage(lastPage([main])), selection: /id body baseRefName[\s\S]*statusCheckRollup/,
+    },
+    {
+      operation: 'PullRequestClosingIssues', variables: { id: 'pr-21', cursor: 'issues-2' },
+      response: connectionPage([{ ...phase, number: 8 }]), selection: /closingIssuesReferences\(first: 50, after: \$cursor\)/,
+    },
+  );
+  const result = await listRepoPullRequests(client, repo, null);
+  verify();
+  assert.deepEqual(result.map(pr => [pr.number, pr.state, pr.baseRefName, pr.bodyIssueRefs, pr.githubIssueRefs]), [
+    [16, 'merged', 'feature/core/core', ['companie-apps/orchid-board#6', 'another-org/another.repo#2'], []],
+    [21, 'closed', 'main', [], ['companie-apps/orchid-board#1', 'companie-apps/orchid-board#8']],
+  ]);
+});
+
+test('refreshes older open PRs and stops paging recent PRs at the inclusive timestamp', async () => {
+  const older = '2026-11-18T06:00:00Z';
+  const open = repoPr(16, 'OPEN', 'Fix #6', { updatedAt: older, commits: pr(16, 'OPEN', false, 'PENDING').commits });
+  const edited = repoPr(21, 'CLOSED', 'See #5');
+  const { client, verify } = fakeClient(
+    {
+      operation: 'RepoPullRequests', variables: { ...repo, cursor: null, states: ['OPEN'], direction: 'ASC' },
+      response: repoPrPage(firstPage([open, repoPr(22, 'OPEN', '')], 'unused-open')), selection: repoPulls,
+    },
+    {
+      operation: 'RepoPullRequests', variables: { ...repo, cursor: null, states: null, direction: 'DESC' },
+      response: repoPrPage(firstPage([edited, repoPr(17, 'MERGED', 'Closes #9', { updatedAt: older })], 'unused-prs')),
+      selection: repoPulls,
+    },
+  );
+  const result = await listRepoPullRequests(client, repo, prUpdatedAt);
+  verify();
+  assert.deepEqual(result.map(pr => [pr.number, pr.checkStatus, pr.bodyIssueRefs]), [
+    [16, 'running', ['companie-apps/orchid-board#6']], [21, 'pass', []],
+  ]);
+});
 
 test('lists updated issues with hierarchy, configured iteration, and all linked PR states across pages', async () => {
   const since = phase.updatedAt;
