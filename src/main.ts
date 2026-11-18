@@ -1,5 +1,6 @@
 import { ConfigError, boardHome, loadConfig } from './config.ts';
 import { McpServerError, startMcpServer, taskTools } from './mcp/server.ts';
+import { proposalTools } from './proposals/tools.ts';
 import { hasSecret, readSecret, redact, SecretError, type SecretName } from './secrets.ts';
 import { dbPath } from './store/db.ts';
 import { openStore } from './store/store.ts';
@@ -31,7 +32,10 @@ async function main(): Promise<void> {
     mcp = await startMcpServer({
       port: config.mcpPort,
       token: mcpToken,
-      toolsets: [taskTools({ store, claimTtlMs: config.claimTtlMinutes * 60_000 })],
+      toolsets: [
+        taskTools({ store, claimTtlMs: config.claimTtlMinutes * 60_000 }),
+        proposalTools({ store, repos: config.repos }),
+      ],
       onError: (error) => {
         const detail = error instanceof Error ? error.message : 'unknown error';
         console.error(`orchid-board: mcp: ${redact(detail, secrets)}`);

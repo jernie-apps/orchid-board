@@ -11,7 +11,8 @@
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
-    "start": "node src/main.ts"
+    "start": "node src/main.ts",
+    "approve-code": "node src/proposals/approve-code-cli.ts"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
