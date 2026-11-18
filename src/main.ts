@@ -69,7 +69,7 @@ async function main(): Promise<void> {
 
   let web: WebServer | null = null;
   if (hasSecret(home, 'web.passphrase')) {
-    web = await startWebServer({ store, sync: poller, passphrase: readSecret(home, 'web.passphrase'), port: config.port, mcpPort: config.mcpPort });
+    web = await startWebServer({ store, sync: poller, passphrase: readSecret(home, 'web.passphrase'), port: config.port, mcpPort: config.mcpPort, writer });
     console.log(JSON.stringify({ msg: 'web board listening', url: `http://127.0.0.1:${web.port}` }));
   } else {
     console.error(`orchid-board: web board disabled: missing or unreadable ${home}/web.passphrase`);
