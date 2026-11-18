@@ -44,6 +44,9 @@ describe('migrations', () => {
     const db = openDb(':memory:');
     db.exec(`
       ALTER TABLE pr_issues DROP COLUMN source;
+      ALTER TABLE issues DROP COLUMN done_by;
+      ALTER TABLE issues DROP COLUMN done_at;
+      ALTER TABLE approve_codes DROP COLUMN failed_attempts;
       UPDATE meta SET value = '1' WHERE key = 'schema_version';
       INSERT INTO prs (repo, number, url, title, state, draft, updated_at)
       VALUES ('org/repo', 10, 'https://github.com/org/repo/pull/10', 'A PR', 'open', 0, '2026-11-18T00:00:00Z');
