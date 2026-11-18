@@ -22,11 +22,14 @@ interface ClientOptions {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  signal?: AbortSignal;
 }
 
 interface GraphQLOptions {
   /** Disable for mutations when a 5xx could mean the write already happened. */
   retryServerErrors?: boolean;
+  /** A nodes lookup can still return the other requested IDs when an ID is missing. */
+  allowMissingNodes?: boolean;
 }
 
 interface RestOptions {
@@ -39,17 +42,21 @@ export class GitHubClient {
   readonly #fetch: typeof fetch;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #now: () => number;
+  readonly #signal?: AbortSignal;
   #resumeAt = 0;
 
   constructor(token: Secret, options: ClientOptions = {}) {
     this.#token = token;
     this.#fetch = options.fetch ?? fetch;
-    this.#sleep = options.sleep ?? sleep;
+    this.#signal = options.signal;
+    this.#sleep = options.sleep ?? (ms => sleep(ms, undefined, { signal: this.#signal }));
     this.#now = options.now ?? Date.now;
   }
 
   async graphql<T>(query: string, variables: Record<string, unknown> = {}, options: GraphQLOptions = {}): Promise<T> {
-    const result = await this.#request(new URL('/graphql', API), 'POST', { query, variables }, true, options.retryServerErrors ?? true);
+    const result = await this.#request(
+      new URL('/graphql', API), 'POST', { query, variables }, true, options.retryServerErrors ?? true, options.allowMissingNodes,
+    );
     const data = record(result)?.data;
     if (data == null) throw new GitHubError('GitHub GraphQL response did not contain data');
     return data as T;
@@ -69,9 +76,12 @@ export class GitHubClient {
     return await this.#request(url, method, body, false, method === 'GET' || method === 'HEAD') as T;
   }
 
-  async #request(url: URL, method: string, body: unknown, graphql: boolean, retryServerErrors: boolean): Promise<unknown> {
+  async #request(
+    url: URL, method: string, body: unknown, graphql: boolean, retryServerErrors: boolean, allowMissingNodes = false,
+  ): Promise<unknown> {
     let retryAt = 0;
     for (let attempt = 1; ; attempt++) {
+      this.#signal?.throwIfAborted();
       const wait = Math.max(this.#resumeAt, retryAt) - this.#now();
       if (wait > 0) await this.#sleep(wait);
 
@@ -79,6 +89,7 @@ export class GitHubClient {
       try {
         response = await this.#fetch(url, {
           method,
+          signal: this.#signal,
           headers: {
             authorization: `Bearer ${this.#token.reveal()}`,
             accept: 'application/vnd.github+json',
@@ -106,7 +117,9 @@ export class GitHubClient {
       }
 
       const envelope = record(payload);
-      const errors = graphql && Array.isArray(envelope?.errors) ? envelope.errors.map(record) : [];
+      const errors = graphql && Array.isArray(envelope?.errors)
+        ? envelope.errors.map(record).filter(error => !allowMissingNodes || !missingNode(error))
+        : [];
       const detail = [envelope?.message, ...errors.map(error => error?.message)]
         .filter((message): message is string => typeof message === 'string')
         .join('; ');
@@ -140,6 +153,12 @@ export class GitHubClient {
   #responseError(message: string, detail: string, status: number, retryAfter?: number): GitHubError {
     return new GitHubError(redact(detail ? `${message}: ${detail}` : message, [this.#token]), status, retryAfter);
   }
+}
+
+function missingNode(error: Record<string, unknown> | undefined): boolean {
+  const path = error?.path;
+  return error?.type === 'NOT_FOUND' && Array.isArray(path) &&
+    path.length === 2 && path[0] === 'nodes' && Number.isInteger(path[1]);
 }
 
 export interface GitHubPage<T> {
