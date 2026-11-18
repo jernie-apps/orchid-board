@@ -117,6 +117,22 @@ export interface ProposalNode {
   status: NodeStatus;
   issueNumber: number | null;
   issueNodeId: string | null;
+  /** Checklist Por edited in the inbox; null when never edited. */
+  steps: string[] | null;
+  /** Base branch override; null means the convention (Feature: develop, Task: its Feature's branch). */
+  baseBranch: string | null;
+  dependsOn: string | null;
+  /** Por's unsent comment for this item. */
+  draftNote: string | null;
+}
+
+/** Inbox edits to a node's issue content. Omitted fields stay as they are. */
+export interface NodeDetails {
+  body?: string;
+  steps?: readonly string[] | null;
+  baseBranch?: string | null;
+  dependsOn?: string | null;
+  iteration?: string | null;
 }
 
 export interface Proposal {
@@ -127,6 +143,8 @@ export interface Proposal {
   state: ProposalState;
   createdAt: string;
   updatedAt: string;
+  /** Por's unsent note for the whole proposal. */
+  draftNote: string | null;
   /** Parents before children, in submitted order. */
   nodes: ProposalNode[];
 }
@@ -565,11 +583,13 @@ export class Store {
   getProposal(id: string): Proposal | null {
     const row = this.db.prepare('SELECT * FROM proposals WHERE id = ?').get(id);
     if (!row) return null;
+    const reviews = this.#reviews(id);
     const nodes = this.db
       .prepare('SELECT * FROM proposal_nodes WHERE proposal_id = ? ORDER BY position')
       .all(id)
-      .map(toProposalNode);
-    return toProposal(row, nodes);
+      .map(toProposalNode)
+      .map(node => ({ ...node, ...reviews.get(node.key) }));
+    return { ...toProposal(row, nodes), draftNote: this.getMeta(proposalNoteKey(id)) };
   }
 
   listProposals(state?: ProposalState): Proposal[] {
@@ -593,11 +613,12 @@ export class Store {
     if (Number(changes) === 0) throw new StoreError(`no node "${key}" in proposal ${id}`);
   }
 
-  /** Mark a node sent back and record the reviewer's comment. */
+  /** Mark a node sent back and record the reviewer's comment. The sent comment replaces any draft. */
   sendBack(id: string, key: string, comment: { author: string; body: string }, now: Date = this.#clock()): void {
     tx(this.db, () => {
       this.setNodeStatus(id, key, 'sent_back');
       this.addFeedback(id, key, comment.author, comment.body, now);
+      this.#patchReview(id, key, { draftNote: null });
     });
   }
 
@@ -640,6 +661,8 @@ export class Store {
         if (!row) throw new StoreError(`no node "${node.key}" in proposal ${id}`);
         if (row.status !== 'sent_back') throw new StoreError(`node "${node.key}" was not sent back`);
         update.run(node.repo, node.type, node.title, node.body ?? '', node.branch ?? null, node.iteration ?? null, id, node.key);
+        // The agent's rewrite replaces the content Por reviewed, including his inbox edits.
+        this.#clearReview(id, [node.key]);
       }
       this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
       if (nodes.length > 0) this.#invalidateApproveCode(id);
@@ -681,6 +704,7 @@ export class Store {
       const replacements = prepare(proposal, retained);
       const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
       for (const key of removed) remove.run(id, key);
+      this.#clearReview(id, removed);
       const move = this.db.prepare('UPDATE proposal_nodes SET position = ? WHERE proposal_id = ? AND key = ?');
       let position = 0;
       for (const node of proposal.nodes) {
@@ -727,6 +751,157 @@ export class Store {
     });
   }
 
+  // ---- review edits (web inbox) ----
+
+  /** Rename a draft node of a pending proposal. Its branch keeps the name derived when it was proposed. */
+  renameProposalNode(id: string, key: string, title: string, now: Date = this.#clock()): void {
+    const clean = title.trim();
+    if (clean === '') throw new StoreError('title must be non-empty');
+    if (clean.length > MAX_TITLE) throw new StoreError(`title must be at most ${MAX_TITLE} characters`);
+    tx(this.db, () => {
+      const node = this.#reviewableNode(id, key);
+      if (node.title === clean) return;
+      this.db.prepare('UPDATE proposal_nodes SET title = ? WHERE proposal_id = ? AND key = ?').run(clean, id, key);
+      this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
+    });
+  }
+
+  /**
+   * Edit a draft node's issue content from the inbox details pane. Saved at once, so whichever path
+   * approves the proposal (web or MCP code) hands the edited content to the GitHub writer.
+   */
+  updateProposalNodeDetails(id: string, key: string, details: NodeDetails, now: Date = this.#clock()): void {
+    const review: ReviewPatch = {};
+    if (details.body !== undefined && details.body.length > MAX_BODY) throw new StoreError(`description must be at most ${MAX_BODY} characters`);
+    if (details.steps !== undefined) {
+      const steps = details.steps === null ? null : details.steps.map(step => step.trim()).filter(step => step !== '');
+      if (steps && steps.length > MAX_STEPS) throw new StoreError(`at most ${MAX_STEPS} steps`);
+      if (steps?.some(step => step.length > MAX_TITLE || /[\r\n]/.test(step))) throw new StoreError(`each step must be one line of at most ${MAX_TITLE} characters`);
+      review.steps = steps;
+    }
+    if (details.baseBranch !== undefined) {
+      const base = blankToNull(details.baseBranch);
+      if (base !== null && !/^[A-Za-z0-9._/-]{1,200}$/.test(base)) throw new StoreError('base branch must be a branch name');
+      review.baseBranch = base;
+    }
+    if (details.dependsOn !== undefined) {
+      const deps = blankToNull(details.dependsOn);
+      if (deps !== null && (deps.length > MAX_TITLE || /[\r\n]/.test(deps))) throw new StoreError(`depends on must be one line of at most ${MAX_TITLE} characters`);
+      review.dependsOn = deps;
+    }
+    const iteration = details.iteration === undefined ? undefined : blankToNull(details.iteration);
+    if (iteration && iteration.length > MAX_TITLE) throw new StoreError('sprint name is too long');
+    tx(this.db, () => {
+      this.#reviewableNode(id, key);
+      if (details.body !== undefined) {
+        this.db.prepare('UPDATE proposal_nodes SET body = ? WHERE proposal_id = ? AND key = ?').run(details.body.trim(), id, key);
+      }
+      if (iteration !== undefined) {
+        this.db.prepare('UPDATE proposal_nodes SET iteration = ? WHERE proposal_id = ? AND key = ?').run(iteration, id, key);
+      }
+      this.#patchReview(id, key, review);
+      this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
+    });
+  }
+
+  /** Save Por's unsent comment for a draft node (`key`) or for the whole proposal (`key` null). Blank clears it. */
+  setDraftNote(id: string, key: string | null, note: string): void {
+    if (note.length > MAX_NOTE) throw new StoreError(`comments must be at most ${MAX_NOTE} characters`);
+    const value = note.trim() === '' ? null : note;
+    tx(this.db, () => {
+      if (key === null) {
+        const proposal = this.getProposal(id);
+        if (!proposal) throw new StoreError(`no proposal ${id}`);
+        // Clearing is always allowed: sending back the last withheld items ends the review.
+        if (value !== null && !underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
+        if (value === null) this.#deleteMeta(proposalNoteKey(id));
+        else this.setMeta(proposalNoteKey(id), value);
+      } else {
+        this.#reviewableNode(id, key);
+        this.#patchReview(id, key, { draftNote: value });
+      }
+    });
+  }
+
+  // Inbox review data (steps, base branch, depends-on, draft comments) lives in meta, one JSON row per
+  // node, like dropped keys: no migration, and getProposal folds it into ProposalNode for the writer.
+
+  #reviews(id: string): Map<string, Review> {
+    const prefix = reviewPrefix(id);
+    const rows = this.db.prepare('SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?').all(prefix.length, prefix);
+    return new Map(rows.map(row => [String(row.key).slice(prefix.length), parseReview(String(row.value))]));
+  }
+
+  #patchReview(id: string, key: string, patch: ReviewPatch): void {
+    const metaKey = reviewPrefix(id) + key;
+    const raw = this.getMeta(metaKey);
+    const review: Record<string, unknown> = raw === null ? {} : { ...parseReview(raw) };
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      if (value === null) delete review[field];
+      else review[field] = value;
+    }
+    if (Object.keys(review).length === 0) this.#deleteMeta(metaKey);
+    else this.setMeta(metaKey, JSON.stringify(review));
+  }
+
+  #clearReview(id: string, keys: Iterable<string>): void {
+    for (const key of keys) this.#deleteMeta(reviewPrefix(id) + key);
+  }
+
+  #deleteMeta(key: string): void {
+    this.db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+  }
+
+  /**
+   * Drop a node and its subtree from a pending proposal. Reversible until approval;
+   * approveProposal deletes dropped subtrees so they never reach GitHub.
+   */
+  dropProposalNode(id: string, key: string): void {
+    tx(this.db, () => {
+      this.#reviewableNode(id, key, true);
+      const proposal = this.getProposal(id)!;
+      const subtree = subtreeOf(proposal.nodes, key);
+      const fixed = proposal.nodes.find(node => subtree.has(node.key) && (node.status === 'approved' || node.status === 'created'));
+      if (fixed) throw new StoreError(`node "${fixed.key}" is already ${fixed.status} and cannot be dropped`);
+      const dropped = new Set(this.droppedNodeKeys(id));
+      dropped.add(key);
+      this.setMeta(droppedKey(id), JSON.stringify([...dropped]));
+    });
+  }
+
+  restoreProposalNode(id: string, key: string): void {
+    tx(this.db, () => {
+      this.#reviewableNode(id, key, true);
+      const dropped = this.droppedNodeKeys(id).filter(k => k !== key);
+      this.setMeta(droppedKey(id), JSON.stringify(dropped));
+    });
+  }
+
+  /** Node keys Por dropped directly (their subtrees are dropped with them). */
+  droppedNodeKeys(id: string): string[] {
+    const raw = this.getMeta(droppedKey(id));
+    if (raw === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  #reviewableNode(id: string, key: string, allowSentBack = false): ProposalNode {
+    const proposal = this.getProposal(id);
+    if (!proposal) throw new StoreError(`no proposal ${id}`);
+    if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be edited');
+    const node = proposal.nodes.find(n => n.key === key);
+    if (!node) throw new StoreError(`no node "${key}" in proposal ${id}`);
+    if (node.status !== 'draft' && !(allowSentBack && node.status === 'sent_back')) {
+      throw new StoreError(`node "${key}" is ${node.status} and cannot be edited`);
+    }
+    return node;
+  }
+
   // ---- approve codes ----
 
   #invalidateApproveCode(id: string): void {
@@ -767,28 +942,124 @@ export class Store {
     });
   }
 
-  /** Consume the code and release reviewed draft nodes to the GitHub writer in one transaction. */
-  approveProposal(id: string, code: string, now: Date = this.#clock()): ApproveResult {
+  /**
+   * Consume the code and release reviewed draft nodes to the GitHub writer in one transaction.
+   * `withhold`: draft nodes Por keeps for more review; they and their subtrees stay draft, and the
+   * proposal can be approved again later (see underReview).
+   */
+  approveProposal(id: string, code: string, now: Date = this.#clock(), options: { withhold?: Iterable<string> } = {}): ApproveResult {
     return tx(this.db, () => {
       const result = this.consumeApproveCode(id, code, now);
       if (!result.ok) return result;
       const proposal = this.getProposal(id)!;
-      if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be approved');
-      const blocked = new Set<string>();
-      let approved = 0;
-      for (const node of proposal.nodes) {
-        if (node.status === 'sent_back' || (node.parentKey !== null && blocked.has(node.parentKey))) {
-          blocked.add(node.key);
-        } else if (node.status === 'draft') {
-          this.setNodeStatus(id, node.key, 'approved');
-          approved++;
-        }
+      if (!underReview(proposal)) throw new StoreError('only pending proposals or withheld draft items can be approved');
+      const withhold = new Set(options.withhold ?? []);
+      for (const key of withhold) {
+        if (!proposal.nodes.some(node => node.key === key)) throw new StoreError(`no node "${key}" in proposal ${id}`);
       }
-      if (approved === 0) throw new StoreError('proposal has no draft nodes ready for approval');
+      const plan = approvalPlan(proposal, this.droppedNodeKeys(id), withhold);
+      const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
+      for (const key of plan.dropped) remove.run(id, key);
+      this.#clearReview(id, plan.dropped);
+      for (const key of plan.approve) this.setNodeStatus(id, key, 'approved');
+      if (plan.approve.length === 0) throw new StoreError('proposal has no draft nodes ready for approval');
+      this.db.prepare('DELETE FROM meta WHERE key = ?').run(droppedKey(id));
       this.setProposalState(id, 'approved', now);
       return result;
     });
   }
+}
+
+const MAX_TITLE = 256;
+const MAX_BODY = 20_000;
+const MAX_STEPS = 50;
+const MAX_NOTE = 4000;
+
+function blankToNull(value: string | null): string | null {
+  const trimmed = value?.trim() ?? '';
+  return trimmed === '' ? null : trimmed;
+}
+
+interface Review {
+  steps?: string[];
+  baseBranch?: string;
+  dependsOn?: string;
+  draftNote?: string;
+}
+/** null removes a field. */
+type ReviewPatch = { [K in keyof Review]?: Review[K] | null };
+
+function reviewPrefix(id: string): string {
+  return `proposal.review:${id}:`;
+}
+
+function proposalNoteKey(id: string): string {
+  return `proposal.note:${id}`;
+}
+
+function parseReview(raw: string): Review {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null) return {};
+  const record = parsed as Record<string, unknown>;
+  const review: Review = {};
+  if (Array.isArray(record.steps)) review.steps = record.steps.filter((step): step is string => typeof step === 'string');
+  for (const field of ['baseBranch', 'dependsOn', 'draftNote'] as const) {
+    if (typeof record[field] === 'string') review[field] = record[field];
+  }
+  return review;
+}
+
+function droppedKey(id: string): string {
+  return `proposal.dropped:${id}`;
+}
+
+/** Keys of `root` and every node below it. Nodes are ordered parents first. */
+function subtreeOf(nodes: readonly ProposalNode[], root: string): Set<string> {
+  const keys = new Set([root]);
+  for (const node of nodes) if (node.parentKey !== null && keys.has(node.parentKey)) keys.add(node.key);
+  return keys;
+}
+
+/**
+ * What approval would do. `dropped`: draft or sent-back nodes removed with a dropped ancestor (or themselves).
+ * `approve`: draft nodes that become approved; a sent-back node holds back its whole subtree.
+ * The web inbox shows the same numbers, so the label and the store never disagree.
+ */
+export function approvalPlan(
+  proposal: Pick<Proposal, 'nodes'>, droppedKeys: Iterable<string>, withheldKeys: Iterable<string> = [],
+): { dropped: string[]; approve: string[] } {
+  const direct = new Set(droppedKeys);
+  const withheld = new Set(withheldKeys);
+  const dropped = new Set<string>();
+  const blocked = new Set<string>();
+  const approve: string[] = [];
+  for (const node of proposal.nodes) {
+    const parent = node.parentKey;
+    if (direct.has(node.key) || (parent !== null && dropped.has(parent))) {
+      if (node.status === 'approved' || node.status === 'created') throw new StoreError(`cannot drop ${node.status} node "${node.key}"`);
+      dropped.add(node.key);
+    } else if (node.status === 'sent_back' || withheld.has(node.key) || (parent !== null && blocked.has(parent))) {
+      blocked.add(node.key);
+    } else if (node.status === 'draft') {
+      approve.push(node.key);
+    }
+  }
+  return { dropped: [...dropped], approve };
+}
+
+/**
+ * Por can still review (edit, drop, send back, approve) a proposal that is pending, or an approved one
+ * with draft items he withheld at approval. Sent-back subtrees wait for the agent, not for Por.
+ */
+export function underReview(proposal: Pick<Proposal, 'state' | 'nodes'>): boolean {
+  if (proposal.state === 'pending') return true;
+  if (proposal.state !== 'approved' && proposal.state !== 'done') return false;
+  return approvalPlan(proposal, []).approve.length > 0;
 }
 
 function hashCode(proposalId: string, code: string): string {
@@ -856,6 +1127,7 @@ function toProposal(row: Row, nodes: ProposalNode[]): Proposal {
     state: String(row.state) as ProposalState,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    draftNote: null,
     nodes,
   };
 }
@@ -874,6 +1146,10 @@ function toProposalNode(row: Row): ProposalNode {
     status: String(row.status) as NodeStatus,
     issueNumber: row.issue_number === null ? null : Number(row.issue_number),
     issueNodeId: strOrNull(row.issue_node_id),
+    steps: null,
+    baseBranch: null,
+    dependsOn: null,
+    draftNote: null,
   };
 }
 

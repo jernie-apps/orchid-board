@@ -6,6 +6,264 @@
   const root = document.documentElement;
   root.classList.add('js');
 
+  // The inbox page is server-rendered forms; it never swaps in the board fragment or listens to SSE.
+  if (document.querySelector('[data-inbox]')) {
+    inbox();
+    return;
+  }
+
+  function inbox() {
+    // All autosaves run one after another; page submits and navigation wait for them.
+    let saving = Promise.resolve();
+    const pending = new Map();
+    const post = (url, body, status, fail) => {
+      saving = saving.then(async () => {
+        if (status) status.textContent = 'Saving…';
+        try {
+          const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', redirect: 'manual' });
+          const ok = res.type === 'opaqueredirect' || res.ok;
+          if (status) status.textContent = ok ? 'Saved' : fail;
+        } catch {
+          if (status) status.textContent = 'Not saved. Check your connection.';
+        }
+      });
+      return saving;
+    };
+    const later = (key, fn, ms = 500) => {
+      clearTimeout(pending.get(key)?.timer);
+      pending.set(key, { fn, timer: setTimeout(() => { pending.delete(key); fn(); }, ms) });
+    };
+    const flush = () => {
+      for (const [key, { fn, timer }] of pending) {
+        clearTimeout(timer);
+        pending.delete(key);
+        fn();
+      }
+      return saving;
+    };
+    const fields = (form, skip) => {
+      const body = new URLSearchParams();
+      for (const [key, value] of new FormData(form)) if (typeof value === 'string' && !skip(key)) body.append(key, value);
+      return body;
+    };
+    const go = href => void flush().then(() => { location.href = href; });
+
+    const form = document.querySelector('form[data-proposal]');
+    const row = key => form && [...form.querySelectorAll('.node[data-key]')].find(el => el.dataset.key === key);
+    if (form) {
+      const saved = form.querySelector('[data-saved]');
+      const send = form.querySelector('[data-send]');
+      const approve = form.querySelector('[data-approve]');
+
+      const counts = () => {
+        const ticked = new Set();
+        for (const box of form.querySelectorAll('input[name="tick"]:checked')) ticked.add(box.closest('.node').dataset.i);
+        for (const box of form.querySelectorAll('input[name="tick"]')) box.closest('.node').classList.toggle('ticked', box.checked);
+        if (send) {
+          send.textContent = ticked.size ? `Send back ${ticked.size}` : 'Send back';
+          send.disabled = ticked.size === 0;
+        }
+        if (approve) {
+          // Ticked items (and everything under them) are held back from this approval.
+          let n = 0;
+          for (const el of form.querySelectorAll('.node[data-ok]')) {
+            const anc = el.dataset.anc ? el.dataset.anc.split(' ') : [];
+            if (!ticked.has(el.dataset.i) && !anc.some(i => ticked.has(i))) n++;
+          }
+          // Approving with ticks creates the rest; ticked items stay drafts for review or send-back.
+          approve.disabled = n === 0;
+          approve.textContent = `Approve ${n} ${n === 1 ? 'issue' : 'issues'}`;
+        }
+        const tickBtn = document.querySelector('[data-tick]');
+        const box = tickBtn && row(tickBtn.dataset.tick)?.querySelector('input[name="tick"]');
+        if (box) tickBtn.textContent = box.checked ? 'Keep this item' : 'Send this back';
+      };
+
+      const saveTitles = () => {
+        const body = fields(form, key => key === 'tick');
+        body.set('op', 'save');
+        return post(form.action, body, saved, 'Not saved. Check the titles.');
+      };
+
+      form.addEventListener('change', event => {
+        const el = event.target;
+        if (!(el instanceof HTMLInputElement)) return;
+        if (el.name === 'tick') counts();
+        else if (el.name.startsWith('title:') && el.checkValidity()) saveTitles();
+      });
+      form.addEventListener('keydown', event => {
+        const el = event.target;
+        if (event.key === 'Enter' && el instanceof HTMLInputElement && el.name.startsWith('title:')) {
+          event.preventDefault();
+          el.blur();
+        }
+      });
+      // Let pending autosaves land before a drop, approve, details or send-back submits the page.
+      form.addEventListener('submit', event => {
+        if (form.dataset.flushed) return;
+        event.preventDefault();
+        const submitter = event.submitter;
+        void flush().then(() => {
+          form.dataset.flushed = '1';
+          form.requestSubmit(submitter instanceof HTMLButtonElement ? submitter : undefined);
+        });
+      });
+      counts();
+
+      // "Send this back" in the details pane ticks the row.
+      document.addEventListener('click', event => {
+        const button = event.target instanceof Element && event.target.closest('[data-tick]');
+        const box = button && row(button.dataset.tick)?.querySelector('input[name="tick"]');
+        if (!box) return;
+        box.checked = !box.checked;
+        counts();
+      });
+    }
+
+    const details = document.querySelector('form[data-details]');
+    if (details) {
+      const status = details.querySelector('[data-dsaved]');
+      const steps = details.querySelector('[data-steps]');
+      const key = details.querySelector('input[name="key"]').value;
+      const saveDetails = () => {
+        const body = fields(details, name => name === 'op');
+        body.set('op', 'details');
+        return post(details.action, body, status, 'Not saved. Check the fields.');
+      };
+      // The row's "Comment" tag follows the draft comment as Por types.
+      const tag = () => {
+        const note = details.querySelector('textarea[name="note"]').value;
+        const el = row(key)?.querySelector('[data-note-tag]');
+        if (el) {
+          el.hidden = note.trim() === '';
+          el.title = note;
+        }
+      };
+      const renumber = () => {
+        steps.querySelectorAll('[data-step]').forEach((el, i) => {
+          el.querySelector('input').setAttribute('aria-label', `Step ${i + 1}`);
+          el.querySelector('button').setAttribute('aria-label', `Remove step ${i + 1}`);
+          el.querySelector('button').value = `step-del:${i}`;
+        });
+      };
+      details.addEventListener('input', event => {
+        if (event.target.name === 'note') tag();
+        later('details', saveDetails);
+      });
+      details.addEventListener('change', () => later('details', saveDetails, 0));
+      details.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
+          event.preventDefault();
+          later('details', saveDetails, 0);
+        }
+      });
+      details.addEventListener('click', event => {
+        const target = event.target instanceof Element ? event.target : null;
+        const add = target && target.closest('[data-add-step]');
+        const del = target && target.closest('[data-del-step]');
+        if (add && steps) {
+          event.preventDefault();
+          const tpl = document.createElement('template');
+          tpl.innerHTML = '<div class="step" data-step><input class="fld" name="step" maxlength="256"><button class="icon-b" type="submit" name="op" data-del-step>'
+            + '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>';
+          const el = tpl.content.firstElementChild;
+          el.querySelector('input').value = 'New step';
+          steps.append(el);
+          renumber();
+          el.querySelector('input').select();
+          later('details', saveDetails, 0);
+        } else if (del) {
+          event.preventDefault();
+          const el = del.closest('[data-step]');
+          const next = el.nextElementSibling || el.previousElementSibling;
+          el.remove();
+          renumber();
+          (next ? next.querySelector('input') : details.querySelector('[data-add-step]')).focus();
+          later('details', saveDetails, 0);
+        }
+      });
+      details.addEventListener('submit', event => {
+        event.preventDefault();
+        later('details', saveDetails, 0);
+      });
+      // Closing the pane or picking another item waits for the last edit to save.
+      for (const link of document.querySelectorAll('.ib-detail a[href]')) {
+        link.addEventListener('click', event => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+          event.preventDefault();
+          go(link.href);
+        });
+      }
+      addEventListener('pagehide', () => void flush());
+    }
+
+    const dialog = document.querySelector('form[data-sendback]');
+    if (dialog) {
+      const confirm = dialog.querySelector('[data-confirm]');
+      const proposal = dialog.action.replace(/\/send-back$/, '');
+      const cancel = dialog.querySelector('.dlg-act a');
+      const check = () => {
+        const items = dialog.querySelectorAll('[data-item]');
+        let missing = false;
+        for (const item of items) {
+          const empty = item.querySelector('textarea').value.trim() === '';
+          if (empty) missing = true;
+          if (!empty) item.querySelector('[data-warn]').hidden = true;
+        }
+        for (const count of dialog.querySelectorAll('[data-count]')) count.textContent = String(items.length);
+        if (confirm) confirm.disabled = missing || items.length === 0;
+      };
+      // Comments typed here are drafts too: they survive a reload or a cancel and prefill the next send-back.
+      const saveNotes = () => {
+        const body = fields(dialog, name => name === 'key' || name === 'untick' || name === 'op');
+        body.set('op', 'notes');
+        return post(proposal, body, null, '');
+      };
+      dialog.addEventListener('input', () => {
+        check();
+        later('notes', saveNotes);
+      });
+      dialog.addEventListener('click', event => {
+        const button = event.target instanceof Element && event.target.closest('button[name="untick"]');
+        if (!button) return;
+        event.preventDefault();
+        button.closest('[data-item]').remove();
+        if (!dialog.querySelector('[data-item]')) {
+          go(cancel ? cancel.href : proposal);
+          return;
+        }
+        check();
+      });
+      if (cancel) {
+        cancel.addEventListener('click', event => {
+          event.preventDefault();
+          go(cancel.href);
+        });
+      }
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') go(cancel ? cancel.href : proposal);
+      });
+      dialog.addEventListener('submit', event => {
+        if (dialog.dataset.flushed) return;
+        event.preventDefault();
+        const submitter = event.submitter;
+        void flush().then(() => {
+          dialog.dataset.flushed = '1';
+          dialog.requestSubmit(submitter instanceof HTMLButtonElement ? submitter : undefined);
+        });
+      });
+      const first = dialog.querySelector('textarea');
+      if (first) first.focus();
+      check();
+    }
+
+    // Approved proposals: refresh while the GitHub write runs, so created issues and errors show up.
+    // Not while Por is editing withheld items: a reload would cut his typing.
+    if (document.querySelector('[data-writing]') && !document.querySelector('form[data-proposal], form[data-details], form[data-sendback]')) {
+      setTimeout(() => location.reload(), 5000);
+    }
+  }
+
   let closed = new Set();
   try {
     closed = new Set(JSON.parse(localStorage.getItem(KEY) || '[]'));

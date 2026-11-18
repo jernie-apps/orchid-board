@@ -54,10 +54,17 @@ export function writeMarker(proposalId: string, key: string): string {
   return `<!-- orchid:proposal=${encodeURIComponent(proposalId)} node=${encodeURIComponent(key)} -->`;
 }
 
-export function issueBody(node: Pick<ProposalNode, 'body' | 'branch'>, marker: string): string {
+/** Issue body: description, the inbox checklist and branch lines, then the hidden resume marker. */
+export function issueBody(
+  node: Pick<ProposalNode, 'body' | 'branch'> & Partial<Pick<ProposalNode, 'steps' | 'baseBranch' | 'dependsOn'>>,
+  marker: string,
+): string {
   const parts = [];
   if (node.body.trim() !== '') parts.push(node.body.trim());
+  if (node.steps && node.steps.length > 0) parts.push('## Steps\n\n' + node.steps.map(step => '- [ ] ' + step).join('\n'));
   if (node.branch !== null) parts.push('Branch: `' + node.branch + '`');
+  if (node.baseBranch) parts.push('Base: `' + node.baseBranch + '`');
+  if (node.dependsOn) parts.push('Depends on: ' + node.dependsOn);
   parts.push(marker);
   return parts.join('\n\n');
 }
