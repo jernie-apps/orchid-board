@@ -105,6 +105,10 @@ const MIGRATIONS: readonly string[] = [
   ALTER TABLE issues ADD COLUMN done_by TEXT;
   ALTER TABLE issues ADD COLUMN done_at TEXT;
   `,
+  // 3: limit guesses against the current approve code.
+  `
+  ALTER TABLE approve_codes ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -121,7 +125,7 @@ export function dbPath(home: string): string {
 /** Open (creating if needed) and migrate. Use `':memory:'` in tests. */
 export function openDb(path: string): DB {
   const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+  db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
   migrate(db);
   return db;
 }
@@ -135,6 +139,12 @@ export function migrate(db: DB): number {
   }
   for (let version = current; version < SCHEMA_VERSION; version++) {
     tx(db, () => {
+      // The CLI and server can open the same database during an upgrade.
+      const installed = schemaVersion(db);
+      if (installed > SCHEMA_VERSION) {
+        throw new SchemaError(`board.db schema ${installed} is newer than this build (${SCHEMA_VERSION})`);
+      }
+      if (installed > version) return;
       db.exec(MIGRATIONS[version]!);
       db.prepare(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

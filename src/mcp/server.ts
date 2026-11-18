@@ -84,7 +84,7 @@ export function taskTools({ store, claimTtlMs }: TaskToolsDeps): Toolset {
         annotations: { readOnlyHint: true },
       },
       (args) =>
-        run(() => {
+        runTool(() => {
           const filter = {
             ...(args.repo !== undefined && { repo: args.repo }),
             ...(args.status !== undefined && { state: args.status }),
@@ -106,7 +106,7 @@ export function taskTools({ store, claimTtlMs }: TaskToolsDeps): Toolset {
         annotations: { readOnlyHint: true },
       },
       (args) =>
-        run(() => {
+        runTool(() => {
           const issue = requireIssue(args.ref);
           const parents: Array<Pick<Issue, 'ref' | 'type' | 'title' | 'state'>> = [];
           const seen = new Set([issue.ref]);
@@ -133,7 +133,7 @@ export function taskTools({ store, claimTtlMs }: TaskToolsDeps): Toolset {
         inputSchema: taskSchemas.claim,
       },
       (args) =>
-        run(() => {
+        runTool(() => {
           requireTask(args.task);
           return store.claim(args.task, args.agent, { ttlMs: claimTtlMs });
         }),
@@ -146,7 +146,7 @@ export function taskTools({ store, claimTtlMs }: TaskToolsDeps): Toolset {
         inputSchema: taskSchemas.release,
       },
       (args) =>
-        run(() => {
+        runTool(() => {
           requireTask(args.task);
           if (!store.release(args.task, args.agent)) throw new ToolError(`${args.task} has no claim`);
           return { task: args.task, released: true };
@@ -161,7 +161,7 @@ export function taskTools({ store, claimTtlMs }: TaskToolsDeps): Toolset {
         inputSchema: taskSchemas.done,
       },
       (args) =>
-        run(() => {
+        runTool(() => {
           requireTask(args.task);
           return store.markDone(args.task, args.agent);
         }),
@@ -179,7 +179,7 @@ export function ciRollup(prs: readonly Pr[]): ChecksRollup {
 }
 
 /** Run a tool body; known errors become `isError` results, unknown ones a generic message. */
-function run(body: () => unknown): CallToolResult {
+export function runTool(body: () => unknown): CallToolResult {
   try {
     return { content: [{ type: 'text', text: JSON.stringify(body(), null, 2) }] };
   } catch (err) {
