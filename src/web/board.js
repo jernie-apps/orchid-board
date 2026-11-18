@@ -49,25 +49,47 @@
     }
   }
 
+  // A navigation (push given) is never aborted by a live refresh; the refresh runs after it lands.
   let loading = null;
+  let refreshAfter = false;
   async function load(search, push) {
-    const ctrl = new AbortController();
-    if (loading) loading.abort();
-    loading = ctrl;
-    let res;
+    if (loading) {
+      if (loading.nav && push === undefined) {
+        refreshAfter = true;
+        return;
+      }
+      loading.ctrl.abort();
+    }
+    const job = { ctrl: new AbortController(), nav: push !== undefined };
+    loading = job;
     try {
-      res = await fetch(`/fragment${search}`, { credentials: 'same-origin', signal: ctrl.signal });
+      await swap(search, push, job.ctrl.signal);
+    } finally {
+      if (loading === job) {
+        loading = null;
+        if (refreshAfter) {
+          refreshAfter = false;
+          void load(location.search);
+        }
+      }
+    }
+  }
+
+  async function swap(search, push, signal) {
+    let res;
+    let html;
+    try {
+      res = await fetch(`/fragment${search}`, { credentials: 'same-origin', signal });
+      if (res.status === 401) {
+        location.href = '/login';
+        return;
+      }
+      if (!res.ok) return;
+      html = await res.text();
     } catch {
       return;
     }
-    if (res.status === 401) {
-      location.href = '/login';
-      return;
-    }
-    if (!res.ok) return;
-    const html = await res.text();
-    if (ctrl.signal.aborted) return;
-    loading = null;
+    if (signal.aborted) return;
     const focused = document.activeElement;
     const focusKey = focused && (focused.getAttribute('name') || focused.closest('.row')?.dataset.ref);
     const scroll = window.scrollY;
@@ -132,6 +154,17 @@
   };
   if ('EventSource' in window) {
     const events = new EventSource('/events');
+    let opened = false;
+    // After a reconnect, changes sent while the stream was down are lost: re-fetch once.
+    events.addEventListener('open', () => {
+      if (opened) refresh();
+      opened = true;
+    });
+    // A refused reconnect (e.g. 401 after a server restart) closes the stream for good.
+    // Re-fetch so the fragment's 401 handler sends the user to /login.
+    events.addEventListener('error', () => {
+      if (events.readyState === EventSource.CLOSED) refresh();
+    });
     events.addEventListener('change', refresh);
     events.addEventListener('synced', event => {
       const span = document.querySelector('[data-synced]');
