@@ -32,6 +32,10 @@ export interface BoardView {
   lastSyncAt: number | null;
   mcpPort: number;
   now: number;
+  /** Pending proposals for the header's Inbox link. */
+  inboxCount?: number;
+  /** Per-session CSRF token for the page's POST forms. */
+  csrf?: string;
 }
 
 const STATUS_FILTERS: readonly StatusFilter[] = ['all', 'working', 'needs', 'failed'];
@@ -158,7 +162,7 @@ function sinceText(fromMs: number, nowMs: number): string {
   return age === 'now' ? 'just now' : `${age} ago`;
 }
 
-function badge(status: Status): string {
+export function badge(status: Status): string {
   return `<span class="badge st-${status.tone}"><span class="g" aria-hidden="true"></span>${esc(status.label)}</span>`;
 }
 
@@ -167,7 +171,7 @@ function chip(node: TreeNode): string {
   return `<span class="chip chip-${level}">${esc(node.type ?? 'Issue')}</span>`;
 }
 
-function shortRepo(repo: string): string {
+export function shortRepo(repo: string): string {
   return repo.slice(repo.indexOf('/') + 1);
 }
 
@@ -347,9 +351,23 @@ function renderHeader(view: BoardView, query: BoardQuery, tasks: readonly TreeNo
     seg('all', 'All'), seg('working', `Working ${count('working')}`), seg('needs', `Needs you ${count('needs')}`), seg('failed', `Failed ${count('failed')}`),
     '</nav>',
     '<span class="grow"></span>',
-    '<form method="post" action="/logout"><button class="btn" type="submit">Log out</button></form>',
+    inboxLink(view.inboxCount ?? 0),
+    logoutForm(view.csrf),
     '</header>',
   ].join('');
+}
+
+export function csrfField(token: string | undefined): string {
+  return token ? `<input type="hidden" name="csrf" value="${esc(token)}">` : '';
+}
+
+export function logoutForm(csrf: string | undefined): string {
+  return `<form method="post" action="/logout">${csrfField(csrf)}<button class="btn" type="submit">Log out</button></form>`;
+}
+
+function inboxLink(count: number): string {
+  if (count === 0) return '<a class="btn inbox-link" href="/inbox">Inbox</a>';
+  return `<a class="btn inbox-link" href="/inbox" aria-label="Inbox, ${count} waiting">Inbox<span class="pill">${count}</span></a>`;
 }
 
 function renderDetail(view: BoardView, query: BoardQuery): string {
@@ -430,7 +448,7 @@ export function renderApp(view: BoardView, query: BoardQuery): string {
   ].join('\n');
 }
 
-function page(body: string, script: boolean): string {
+export function page(body: string, script: boolean, title = 'Orchid Board'): string {
   return [
     '<!doctype html>',
     '<html lang="en">',
@@ -438,7 +456,7 @@ function page(body: string, script: boolean): string {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     '<meta name="color-scheme" content="light dark">',
-    '<title>Orchid Board</title>',
+    `<title>${esc(title)}</title>`,
     '<link rel="stylesheet" href="/board.css">',
     script ? '<script src="/board.js" defer></script>' : '',
     '</head>',

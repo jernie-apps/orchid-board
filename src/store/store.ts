@@ -727,6 +727,70 @@ export class Store {
     });
   }
 
+  // ---- review edits (web inbox) ----
+
+  /** Rename a draft node of a pending proposal. Its branch keeps the name derived when it was proposed. */
+  renameProposalNode(id: string, key: string, title: string, now: Date = this.#clock()): void {
+    const clean = title.trim();
+    if (clean === '') throw new StoreError('title must be non-empty');
+    if (clean.length > MAX_TITLE) throw new StoreError(`title must be at most ${MAX_TITLE} characters`);
+    tx(this.db, () => {
+      const node = this.#reviewableNode(id, key);
+      if (node.title === clean) return;
+      this.db.prepare('UPDATE proposal_nodes SET title = ? WHERE proposal_id = ? AND key = ?').run(clean, id, key);
+      this.db.prepare('UPDATE proposals SET updated_at = ? WHERE id = ?').run(now.toISOString(), id);
+    });
+  }
+
+  /**
+   * Drop a node and its subtree from a pending proposal. Reversible until approval;
+   * approveProposal deletes dropped subtrees so they never reach GitHub.
+   */
+  dropProposalNode(id: string, key: string): void {
+    tx(this.db, () => {
+      this.#reviewableNode(id, key, true);
+      const proposal = this.getProposal(id)!;
+      const subtree = subtreeOf(proposal.nodes, key);
+      const fixed = proposal.nodes.find(node => subtree.has(node.key) && (node.status === 'approved' || node.status === 'created'));
+      if (fixed) throw new StoreError(`node "${fixed.key}" is already ${fixed.status} and cannot be dropped`);
+      const dropped = new Set(this.droppedNodeKeys(id));
+      dropped.add(key);
+      this.setMeta(droppedKey(id), JSON.stringify([...dropped]));
+    });
+  }
+
+  restoreProposalNode(id: string, key: string): void {
+    tx(this.db, () => {
+      this.#reviewableNode(id, key, true);
+      const dropped = this.droppedNodeKeys(id).filter(k => k !== key);
+      this.setMeta(droppedKey(id), JSON.stringify(dropped));
+    });
+  }
+
+  /** Node keys Por dropped directly (their subtrees are dropped with them). */
+  droppedNodeKeys(id: string): string[] {
+    const raw = this.getMeta(droppedKey(id));
+    if (raw === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  #reviewableNode(id: string, key: string, allowSentBack = false): ProposalNode {
+    const proposal = this.getProposal(id);
+    if (!proposal) throw new StoreError(`no proposal ${id}`);
+    if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be edited');
+    const node = proposal.nodes.find(n => n.key === key);
+    if (!node) throw new StoreError(`no node "${key}" in proposal ${id}`);
+    if (node.status !== 'draft' && !(allowSentBack && node.status === 'sent_back')) {
+      throw new StoreError(`node "${key}" is ${node.status} and cannot be edited`);
+    }
+    return node;
+  }
+
   // ---- approve codes ----
 
   #invalidateApproveCode(id: string): void {
@@ -774,21 +838,53 @@ export class Store {
       if (!result.ok) return result;
       const proposal = this.getProposal(id)!;
       if (proposal.state !== 'pending') throw new StoreError('only pending proposals can be approved');
-      const blocked = new Set<string>();
-      let approved = 0;
-      for (const node of proposal.nodes) {
-        if (node.status === 'sent_back' || (node.parentKey !== null && blocked.has(node.parentKey))) {
-          blocked.add(node.key);
-        } else if (node.status === 'draft') {
-          this.setNodeStatus(id, node.key, 'approved');
-          approved++;
-        }
-      }
-      if (approved === 0) throw new StoreError('proposal has no draft nodes ready for approval');
+      const plan = approvalPlan(proposal, this.droppedNodeKeys(id));
+      const remove = this.db.prepare('DELETE FROM proposal_nodes WHERE proposal_id = ? AND key = ?');
+      for (const key of plan.dropped) remove.run(id, key);
+      for (const key of plan.approve) this.setNodeStatus(id, key, 'approved');
+      if (plan.approve.length === 0) throw new StoreError('proposal has no draft nodes ready for approval');
+      this.db.prepare('DELETE FROM meta WHERE key = ?').run(droppedKey(id));
       this.setProposalState(id, 'approved', now);
       return result;
     });
   }
+}
+
+const MAX_TITLE = 256;
+
+function droppedKey(id: string): string {
+  return `proposal.dropped:${id}`;
+}
+
+/** Keys of `root` and every node below it. Nodes are ordered parents first. */
+function subtreeOf(nodes: readonly ProposalNode[], root: string): Set<string> {
+  const keys = new Set([root]);
+  for (const node of nodes) if (node.parentKey !== null && keys.has(node.parentKey)) keys.add(node.key);
+  return keys;
+}
+
+/**
+ * What approval would do. `dropped`: draft or sent-back nodes removed with a dropped ancestor (or themselves).
+ * `approve`: draft nodes that become approved; a sent-back node holds back its whole subtree.
+ * The web inbox shows the same numbers, so the label and the store never disagree.
+ */
+export function approvalPlan(proposal: Pick<Proposal, 'nodes'>, droppedKeys: Iterable<string>): { dropped: string[]; approve: string[] } {
+  const direct = new Set(droppedKeys);
+  const dropped = new Set<string>();
+  const blocked = new Set<string>();
+  const approve: string[] = [];
+  for (const node of proposal.nodes) {
+    const parent = node.parentKey;
+    if (direct.has(node.key) || (parent !== null && dropped.has(parent))) {
+      if (node.status === 'approved' || node.status === 'created') throw new StoreError(`cannot drop ${node.status} node "${node.key}"`);
+      dropped.add(node.key);
+    } else if (node.status === 'sent_back' || (parent !== null && blocked.has(parent))) {
+      blocked.add(node.key);
+    } else if (node.status === 'draft') {
+      approve.push(node.key);
+    }
+  }
+  return { dropped: [...dropped], approve };
 }
 
 function hashCode(proposalId: string, code: string): string {

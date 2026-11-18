@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import type { Secret } from '../secrets.ts';
 import type { Store } from '../store/store.ts';
 import type { SyncEvents } from '../sync/poller.ts';
+import { applyProposalPost, applySendBack, isProposalId, renderInbox, type InboxOutcome, type InboxState, type InboxWriter } from './inbox.ts';
 import { parseQuery, renderApp, renderLogin, renderPage, type BoardQuery, type BoardView } from './render.ts';
 
 /** What the board needs from the poller: change events and the last successful poll. */
@@ -21,6 +22,8 @@ export interface WebServerOptions {
   /** Listen port on 127.0.0.1; 0 picks a free one (tests). */
   port: number;
   mcpPort: number;
+  /** GitHub writer, kicked when Por approves in the inbox. Without it approval only marks the proposal. */
+  writer?: InboxWriter;
   now?: () => number;
   sessionTtlMs?: number;
   heartbeatMs?: number;
@@ -36,6 +39,8 @@ const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 60_000;
 const MAX_BODY = 4096;
+/** Inbox forms carry every title of a proposal plus comments. */
+const MAX_INBOX_BODY = 256 * 1024;
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
@@ -56,6 +61,11 @@ function sha256(value: string): Buffer {
 /** Constant-time compare on fixed-length hashes, so neither length nor content leaks through timing. */
 export function passphraseMatches(given: string, secret: Secret): boolean {
   return timingSafeEqual(sha256(given), sha256(secret.reveal()));
+}
+
+/** CSRF check: constant-time compare of fixed-length hashes. */
+export function tokenMatches(given: string, expected: string): boolean {
+  return timingSafeEqual(sha256(given), sha256(expected));
 }
 
 /** Failed-login limiter: at most `max` failures per key inside a sliding window. */
@@ -126,18 +136,20 @@ function redirect(res: ServerResponse, location: string, headers: Record<string,
   send(res, 303, '', { Location: location, ...headers });
 }
 
-async function readForm(req: IncomingMessage): Promise<URLSearchParams | null> {
+async function readForm(req: IncomingMessage, max = MAX_BODY): Promise<URLSearchParams | null> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY) return null;
+    if (size > max) return null;
     chunks.push(chunk as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
 }
 
-export function buildView(store: Store, sync: SyncSource, query: BoardQuery, mcpPort: number, now: number): BoardView {
+export function buildView(
+  store: Store, sync: SyncSource, query: BoardQuery, mcpPort: number, now: number, csrf?: string,
+): BoardView {
   const issues = store.listIssues();
   const repos = [...new Set(issues.map(issue => issue.repo))].sort();
   const sprints = [...new Set(issues.flatMap(issue => (issue.iteration ? [issue.iteration.title] : [])))].sort();
@@ -145,7 +157,8 @@ export function buildView(store: Store, sync: SyncSource, query: BoardQuery, mcp
     ...(query.repo ? { repo: query.repo } : {}),
     ...(query.sprint ? { iteration: query.sprint } : {}),
   });
-  return { tree, repos, sprints, issueCount: issues.length, lastSyncAt: sync.lastSyncAt, mcpPort, now };
+  const inboxCount = store.listProposals('pending').length;
+  return { tree, repos, sprints, issueCount: issues.length, lastSyncAt: sync.lastSyncAt, mcpPort, now, inboxCount, ...(csrf ? { csrf } : {}) };
 }
 
 interface Stream {
@@ -153,19 +166,25 @@ interface Stream {
   session: string;
 }
 
+interface Session {
+  expires: number;
+  /** Per-session token every POST must echo back. */
+  csrf: string;
+}
+
 /** Start the board on 127.0.0.1. Resolves once listening. */
 export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
   const { store, passphrase, sync, mcpPort } = options;
   const now = options.now ?? Date.now;
   const ttl = options.sessionTtlMs ?? SESSION_TTL_MS;
-  const sessions = new Map<string, number>();
+  const sessions = new Map<string, Session>();
   const limiter = new LoginLimiter();
   const streams = new Set<Stream>();
 
   const session = (req: IncomingMessage): string | null => {
     const id = cookie(req, COOKIE);
     if (!id) return null;
-    const expires = sessions.get(id);
+    const expires = sessions.get(id)?.expires;
     if (expires === undefined) return null;
     if (expires <= now()) {
       sessions.delete(id);
@@ -191,7 +210,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   sync.events.on('synced', onSynced);
 
   const heartbeat = setInterval(() => {
-    for (const [id, expires] of sessions) if (expires <= now()) sessions.delete(id);
+    for (const [id, { expires }] of sessions) if (expires <= now()) sessions.delete(id);
     endStreams(stream => !sessions.has(stream.session));
     for (const stream of streams) stream.res.write(': ping\n\n');
   }, options.heartbeatMs ?? 25_000);
@@ -223,7 +242,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         return send(res, 401, renderLogin('Wrong passphrase.'));
       }
       const id = randomBytes(32).toString('base64url');
-      sessions.set(id, now() + ttl);
+      sessions.set(id, { expires: now() + ttl, csrf: randomBytes(32).toString('base64url') });
       const maxAge = Math.floor(ttl / 1000);
       return redirect(res, '/', { 'Set-Cookie': `${COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict` });
     }
@@ -235,8 +254,19 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
     const id = session(req);
     if (!id) {
-      if (method === 'GET' && path === '/') return redirect(res, '/login');
+      if (method === 'GET' && (path === '/' || path === '/inbox' || path.startsWith('/inbox/'))) return redirect(res, '/login');
       return send(res, 401, 'Login required', { 'Content-Type': 'text/plain; charset=utf-8' });
+    }
+    const csrf = sessions.get(id)!.csrf;
+
+    // Every POST past login carries the session's CSRF token.
+    let form: URLSearchParams | null = null;
+    if (method === 'POST') {
+      form = await readForm(req, path.startsWith('/inbox/') ? MAX_INBOX_BODY : MAX_BODY);
+      if (!form) return send(res, 413, 'Request too large', { 'Content-Type': 'text/plain; charset=utf-8' });
+      if (!tokenMatches(form.get('csrf') ?? '', csrf)) {
+        return send(res, 403, 'Invalid or missing CSRF token. Reload the page and try again.', { 'Content-Type': 'text/plain; charset=utf-8' });
+      }
     }
 
     if (path === '/logout' && method === 'POST') {
@@ -244,6 +274,40 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       endStreams(stream => stream.session === id);
       return redirect(res, '/login', { 'Set-Cookie': `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict` });
     }
+    const inbox = /^\/inbox(?:\/([^/]+)(\/send-back)?)?$/.exec(path);
+    if (inbox) {
+      const proposalId = inbox[1] === undefined ? null : inbox[1];
+      if (proposalId !== null && !isProposalId(proposalId)) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+      const showInbox = (status: number, state: InboxState = {}) => {
+        const proposals = store.listProposals();
+        const selected = proposalId === null
+          ? proposals.filter(p => p.state === 'pending').sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
+          : store.getProposal(proposalId);
+        if (!selected && proposalId !== null) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+        const html = renderInbox({
+          ...state,
+          proposals,
+          selected,
+          dropped: selected ? store.droppedNodeKeys(selected.id) : [],
+          feedback: selected ? store.getFeedback(selected.id).comments : [],
+          write: selected && options.writer ? options.writer.status(selected.id) : null,
+          csrf,
+          now: now(),
+        });
+        return send(res, status, html);
+      };
+      if (method === 'GET' && !inbox[2]) return showInbox(200);
+      if (method !== 'POST' || proposalId === null || !form) {
+        return send(res, 405, 'Method not allowed', { Allow: inbox[2] ? 'POST' : proposalId === null ? 'GET' : 'GET, POST', 'Content-Type': 'text/plain; charset=utf-8' });
+      }
+      const outcome: InboxOutcome = inbox[2]
+        ? applySendBack(store, proposalId, form, now())
+        : applyProposalPost(store, options.writer ?? null, proposalId, form, now());
+      if (outcome.kind === 'missing') return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+      if (outcome.kind === 'redirect') return redirect(res, outcome.location);
+      return showInbox(outcome.status, outcome.state);
+    }
+
     if (method !== 'GET') return send(res, 405, 'Method not allowed', { Allow: 'GET', 'Content-Type': 'text/plain; charset=utf-8' });
 
     if (path === '/board.js') {
@@ -251,7 +315,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     }
     if (path === '/' || path === '/fragment') {
       const query = parseQuery(url.searchParams);
-      const view = buildView(store, sync, query, mcpPort, now());
+      const view = buildView(store, sync, query, mcpPort, now(), csrf);
       return send(res, 200, path === '/' ? renderPage(view, query) : renderApp(view, query));
     }
     if (path === '/events') {

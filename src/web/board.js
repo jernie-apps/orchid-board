@@ -6,6 +6,121 @@
   const root = document.documentElement;
   root.classList.add('js');
 
+  // The inbox page is server-rendered forms; it never swaps in the board fragment or listens to SSE.
+  if (document.querySelector('[data-inbox]')) {
+    inbox();
+    return;
+  }
+
+  function inbox() {
+    const form = document.querySelector('form[data-proposal]');
+    if (form) {
+      const saved = form.querySelector('[data-saved]');
+      const send = form.querySelector('[data-send]');
+      const approve = form.querySelector('[data-approve]');
+      const approveText = approve ? approve.textContent : '';
+
+      const counts = () => {
+        const ticked = new Set();
+        for (const box of form.querySelectorAll('input[name="tick"]:checked')) ticked.add(box.closest('.node').dataset.i);
+        for (const box of form.querySelectorAll('input[name="tick"]')) box.closest('.node').classList.toggle('ticked', box.checked);
+        if (send) {
+          send.textContent = ticked.size ? `Send back ${ticked.size}` : 'Send back';
+          send.disabled = ticked.size === 0;
+        }
+        if (approve) {
+          // Ticked items (and everything under them) are held back until they are sent back or unticked.
+          let n = 0;
+          for (const row of form.querySelectorAll('.node[data-ok]')) {
+            const anc = row.dataset.anc ? row.dataset.anc.split(' ') : [];
+            if (!ticked.has(row.dataset.i) && !anc.some(i => ticked.has(i))) n++;
+          }
+          approve.disabled = ticked.size > 0 || n === 0;
+          approve.textContent = ticked.size ? `Approve ${n} after sending back` : approveText;
+        }
+      };
+
+      let saving = Promise.resolve();
+      const autosave = () => {
+        const body = new URLSearchParams();
+        for (const [key, value] of new FormData(form)) if (typeof value === 'string' && key !== 'tick') body.append(key, value);
+        body.set('op', 'save');
+        saving = saving.then(async () => {
+          if (saved) saved.textContent = 'Saving…';
+          try {
+            const res = await fetch(form.action, { method: 'POST', body, credentials: 'same-origin', redirect: 'manual' });
+            const ok = res.type === 'opaqueredirect' || res.ok;
+            if (saved) saved.textContent = ok ? 'Saved' : 'Not saved. Check the titles.';
+          } catch {
+            if (saved) saved.textContent = 'Not saved. Check your connection.';
+          }
+        });
+      };
+
+      form.addEventListener('change', event => {
+        const el = event.target;
+        if (!(el instanceof HTMLInputElement)) return;
+        if (el.name === 'tick') counts();
+        else if (el.name.startsWith('title:') && el.checkValidity()) autosave();
+      });
+      form.addEventListener('keydown', event => {
+        const el = event.target;
+        if (event.key === 'Enter' && el instanceof HTMLInputElement && el.name.startsWith('title:')) {
+          event.preventDefault();
+          el.blur();
+        }
+      });
+      // Let a pending autosave land before a drop, approve or send-back submits the page.
+      form.addEventListener('submit', event => {
+        if (form.dataset.flushed) return;
+        event.preventDefault();
+        const submitter = event.submitter;
+        void saving.then(() => {
+          form.dataset.flushed = '1';
+          form.requestSubmit(submitter instanceof HTMLButtonElement ? submitter : undefined);
+        });
+      });
+      counts();
+    }
+
+    const dialog = document.querySelector('form[data-sendback]');
+    if (dialog) {
+      const confirm = dialog.querySelector('[data-confirm]');
+      const check = () => {
+        const items = dialog.querySelectorAll('[data-item]');
+        let missing = false;
+        for (const item of items) {
+          const empty = item.querySelector('textarea').value.trim() === '';
+          if (empty) missing = true;
+          if (!empty) item.querySelector('[data-warn]').hidden = true;
+        }
+        for (const count of dialog.querySelectorAll('[data-count]')) count.textContent = String(items.length);
+        if (confirm) confirm.disabled = missing || items.length === 0;
+      };
+      dialog.addEventListener('input', check);
+      dialog.addEventListener('click', event => {
+        const button = event.target instanceof Element && event.target.closest('button[name="untick"]');
+        if (!button) return;
+        event.preventDefault();
+        button.closest('[data-item]').remove();
+        if (!dialog.querySelector('[data-item]')) {
+          location.href = dialog.action.replace(/\/send-back$/, '');
+          return;
+        }
+        check();
+      });
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') location.href = dialog.action.replace(/\/send-back$/, '');
+      });
+      const first = dialog.querySelector('textarea');
+      if (first) first.focus();
+      check();
+    }
+
+    // Approved proposals: refresh while the GitHub write runs, so created issues and errors show up.
+    if (document.querySelector('[data-writing]')) setTimeout(() => location.reload(), 5000);
+  }
+
   let closed = new Set();
   try {
     closed = new Set(JSON.parse(localStorage.getItem(KEY) || '[]'));
