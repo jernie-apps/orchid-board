@@ -186,7 +186,10 @@ function prState(pr: Pr): string {
 function prLink(pr: Pr, issueRepo: string): string {
   const url = githubUrl(pr.url);
   const text = esc(prLabel(pr, issueRepo));
-  return url ? `<a class="mono pr" href="${esc(url)}" title="${esc(pr.title)}">${text}</a>` : `<span class="mono">${text}</span>`;
+  // Pull requests open in a new tab, so the board stays where Por left it.
+  return url
+    ? `<a class="mono pr" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.title)}">${text}</a>`
+    : `<span class="mono">${text}</span>`;
 }
 
 function issueUrl(node: TreeNode): string {

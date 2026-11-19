@@ -262,3 +262,10 @@ test('no Done section when nothing top-level is closed', () => {
   const html = renderApp(view(fixtureStore(), ALL), ALL);
   assert.ok(!html.includes('<details'));
 });
+
+test('pull request links open in a new tab without opener access', () => {
+  const html = renderApp(view(fixtureStore(), ALL), { ...ALL, sel: `${REPO}#8` });
+  const links = html.match(/<a class="mono pr"[^>]*>/g) ?? [];
+  assert.ok(links.length >= 2, 'board row and details pane both link the PR');
+  for (const link of links) assert.ok(link.includes(' target="_blank" rel="noopener noreferrer"'), link);
+});
