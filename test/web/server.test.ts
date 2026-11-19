@@ -626,3 +626,18 @@ test('sending back the last withheld items ends the review and still records the
   assert.ok((await (await get('/inbox')).text()).includes('Waiting for you · 0'));
   assert.deepEqual(kicked, [id]);
 });
+
+test('fragment renders closed phases in a Done section that opens for a selected issue inside it', async t => {
+  const { store, request, session } = await fixture(t);
+  store.upsertIssues([
+    { ref: `${REPO}#2`, nodeId: 'n2', type: 'Phase', title: 'Shipped phase', state: 'closed', parent: null, iteration: null, updatedAt: '2026-11-18T00:00:00Z' },
+    { ref: `${REPO}#20`, nodeId: 'n20', type: 'Task', title: 'Shipped task', state: 'closed', parent: `${REPO}#2`, iteration: null, updatedAt: '2026-11-18T00:00:00Z' },
+  ]);
+  const cookie = await session();
+  const html = await (await request('/fragment', { headers: { cookie } })).text();
+  const at = html.indexOf('<details class="done" data-done>');
+  assert.ok(at > html.indexOf(`data-ref="${REPO}#10"`), 'Done section comes after the active tree');
+  assert.ok(html.indexOf(`data-ref="${REPO}#2"`) > at);
+  const selected = await (await request(`/fragment?sel=${encodeURIComponent(`${REPO}#20`)}`, { headers: { cookie } })).text();
+  assert.ok(selected.includes('<details class="done" data-done open>'));
+});

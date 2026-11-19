@@ -297,14 +297,60 @@ function groupSummary(group: Group): string {
   return group.nodes.some(n => n.type === 'Phase') ? summary : `No phase yet · ${summary}`;
 }
 
-function renderTree(view: BoardView, query: BoardQuery): string {
+function groupHeader(repo: string, summary: string): string {
+  return `<div class="grp">${REPO}<span class="grp-name" title="${esc(repo)}">${esc(shortRepo(repo))}</span><span class="meta">${esc(summary)}</span></div>`;
+}
+
+/**
+ * Split each repo group by the top-level issue's own state. A closed Phase moves with its whole subtree;
+ * so does a closed Feature or Task that has no Phase. Children never move on their own.
+ */
+function splitDone(groups: readonly Group[]): { active: Group[]; done: Group[] } {
+  const active: Group[] = [];
+  const done: Group[] = [];
+  for (const group of groups) {
+    const open = group.nodes.filter(n => n.state !== 'closed');
+    const closed = group.nodes.filter(n => n.state === 'closed');
+    if (open.length) active.push({ repo: group.repo, nodes: open });
+    if (closed.length) done.push({ repo: group.repo, nodes: closed });
+  }
+  return { active, done };
+}
+
+/** Closed top-level work, collapsed by default. Open when the selected issue is inside, so the details pane never points at a hidden row. */
+function renderDone(groups: readonly Group[], query: BoardQuery, now: number): string {
   const out: string[] = [];
-  for (const group of groupsOf(view.tree)) {
+  let count = 0;
+  let holdsSel = false;
+  for (const group of groups) {
     const rows = flatten(group.nodes, query.status);
     if (rows.length === 0) continue;
-    out.push(`<div class="grp">${REPO}<span class="grp-name" title="${esc(group.repo)}">${esc(shortRepo(group.repo))}</span><span class="meta">${esc(groupSummary(group))}</span></div>`);
+    const tops = rows.filter(row => row.depth === 0).length;
+    count += tops;
+    holdsSel ||= query.sel !== null && rows.some(row => row.node.ref === query.sel);
+    out.push(groupHeader(group.repo, `${tops} closed`));
+    for (const row of rows) out.push(renderRow(row, query, now));
+  }
+  if (count === 0) return '';
+  return [
+    `<details class="done" data-done${holdsSel ? ' open' : ''}>`,
+    `<summary class="done-h"><span class="chev" aria-hidden="true">${CHEVRON}</span><span class="grp-name">Done</span><span class="meta">${count}</span></summary>`,
+    out.join('\n'),
+    '</details>',
+  ].join('\n');
+}
+
+function renderTree(view: BoardView, query: BoardQuery): string {
+  const out: string[] = [];
+  const { active, done } = splitDone(groupsOf(view.tree));
+  for (const group of active) {
+    const rows = flatten(group.nodes, query.status);
+    if (rows.length === 0) continue;
+    out.push(groupHeader(group.repo, groupSummary(group)));
     for (const row of rows) out.push(renderRow(row, query, view.now));
   }
+  const doneHtml = renderDone(done, query, view.now);
+  if (doneHtml) out.push(doneHtml);
   if (out.length === 0) {
     const text = view.issueCount === 0 ? 'No issues synced yet.' : 'Nothing matches these filters.';
     return `<p class="empty">${text}</p>`;

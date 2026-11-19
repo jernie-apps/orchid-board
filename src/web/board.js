@@ -3,6 +3,7 @@
 (() => {
   'use strict';
   const KEY = 'orchid.board.closed';
+  const DONE_KEY = 'orchid.board.doneOpen';
   const root = document.documentElement;
   root.classList.add('js');
 
@@ -278,7 +279,28 @@
     }
   };
 
+  // The Done section defaults to closed, the inverse of the per-row set above. Only Por's clicks are stored.
+  let doneOpen = false;
+  try {
+    doneOpen = localStorage.getItem(DONE_KEY) === '1';
+  } catch {
+    doneOpen = false;
+  }
+  const saveDone = () => {
+    try {
+      localStorage.setItem(DONE_KEY, doneOpen ? '1' : '0');
+    } catch {
+      // Storage blocked: the Done section state lasts for this page only.
+    }
+  };
+
   const app = () => document.getElementById('app');
+
+  // Server renders it closed (or open when the selected issue is inside); a stored "open" wins over closed.
+  function applyDone() {
+    const done = document.querySelector('details[data-done]');
+    if (done && doneOpen) done.open = true;
+  }
 
   // Status filters show every match, so collapse applies only to the unfiltered view.
   function applyCollapse() {
@@ -359,6 +381,7 @@
     current.replaceWith(next);
     if (push !== undefined) history[push ? 'pushState' : 'replaceState'](null, '', search ? `/${search}` : '/');
     applyCollapse();
+    applyDone();
     updateAges();
     const phoneDetail = next.classList.contains('has-detail') && window.matchMedia('(max-width: 720px)').matches;
     window.scrollTo(0, push && phoneDetail ? 0 : scroll);
@@ -378,6 +401,13 @@
       else closed.add(ref);
       save();
       applyCollapse();
+      return;
+    }
+    const summary = target && target.closest('details[data-done] > summary');
+    if (summary) {
+      // Click runs before the details element toggles, so the new state is the opposite of the current one.
+      doneOpen = !summary.parentElement.open;
+      saveDone();
       return;
     }
     const link = target && target.closest('a[data-nav]');
@@ -437,6 +467,7 @@
   }
 
   applyCollapse();
+  applyDone();
   updateAges();
   setInterval(updateAges, 5000);
 })();
