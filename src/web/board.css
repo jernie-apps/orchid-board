@@ -116,6 +116,14 @@ a.pr { color: var(--accent-text); }
 .av { width: 18px; height: 18px; border-radius: 4px; background: var(--bg-sunken); border: 1px solid var(--border); font: 600 10px/16px var(--sans); color: var(--ink-2); text-align: center; }
 .grp { display: flex; align-items: center; gap: 8px; padding: 14px 16px 6px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-content); color: var(--ink-2); }
 .grp-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+/* Done section: closed top-level work at the bottom, collapsed by default. */
+.done { border-top: 1px solid var(--border); }
+.done-h { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; background: var(--bg-sidebar); color: var(--ink-2); border-bottom: 1px solid var(--border-subtle); cursor: pointer; list-style: none; }
+.done-h::-webkit-details-marker { display: none; }
+.done-h:hover { background: var(--bg-hover); }
+.done-h:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.done:not([open]) > .done-h { border-bottom: 0; }
+.done:not([open]) > .done-h .chev svg { transform: rotate(-90deg); }
 
 /* Status badges: glyph + word, never color alone */
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; line-height: 14px; font-weight: 500; padding: 3px 6px; border-radius: 4px; white-space: nowrap; }
@@ -349,3 +357,24 @@ a.brand:hover { color: var(--ink); }
   .st-working .g { animation: none; }
   .chev svg { transition: none; }
 }
+
+/* Inbox Markdown descriptions */
+.dt-markdown { line-height: 1.5; overflow-wrap: anywhere; }
+.dt-markdown :is(h1, h2, h3, h4, h5, h6, p, pre, ul, ol, blockquote) { margin: 0 0 8px; }
+.dt-markdown :last-child { margin-bottom: 0; }
+.dt-markdown :is(h1, h2, h3, h4, h5, h6) { font: 600 14px/1.4 var(--display); }
+.dt-markdown h1 { font-size: 17px; }
+.dt-markdown h2 { font-size: 15px; }
+.dt-markdown :is(ul, ol) { padding-inline-start: 22px; }
+.dt-markdown li + li { margin-top: 3px; }
+.dt-markdown li > :is(ul, ol) { margin-top: 3px; }
+.dt-markdown .md-task { list-style: none; }
+.dt-markdown input[type="checkbox"] { margin: 0 4px 0 0; vertical-align: middle; accent-color: var(--accent); }
+.dt-markdown blockquote { border-inline-start: 2px solid var(--border-control); padding-inline-start: 10px; color: var(--ink-2); }
+.dt-markdown code { font: 400 12px/1.5 var(--mono); background: var(--bg-sunken); padding: 1px 3px; border-radius: 4px; }
+.dt-markdown pre { overflow-x: auto; overflow-wrap: normal; padding: 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-sunken); }
+.dt-markdown pre code { padding: 0; }
+.dt-edit > summary { width: fit-content; cursor: pointer; color: var(--accent-text); }
+.dt-edit > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dt-edit[open] > summary { margin-bottom: 6px; }
+.dt-edit > textarea { display: block; }

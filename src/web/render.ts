@@ -186,7 +186,10 @@ function prState(pr: Pr): string {
 function prLink(pr: Pr, issueRepo: string): string {
   const url = githubUrl(pr.url);
   const text = esc(prLabel(pr, issueRepo));
-  return url ? `<a class="mono pr" href="${esc(url)}" title="${esc(pr.title)}">${text}</a>` : `<span class="mono">${text}</span>`;
+  // Pull requests open in a new tab, so the board stays where Por left it.
+  return url
+    ? `<a class="mono pr" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.title)}">${text}</a>`
+    : `<span class="mono">${text}</span>`;
 }
 
 function issueUrl(node: TreeNode): string {
@@ -297,14 +300,60 @@ function groupSummary(group: Group): string {
   return group.nodes.some(n => n.type === 'Phase') ? summary : `No phase yet · ${summary}`;
 }
 
-function renderTree(view: BoardView, query: BoardQuery): string {
+function groupHeader(repo: string, summary: string): string {
+  return `<div class="grp">${REPO}<span class="grp-name" title="${esc(repo)}">${esc(shortRepo(repo))}</span><span class="meta">${esc(summary)}</span></div>`;
+}
+
+/**
+ * Split each repo group by the top-level issue's own state. A closed Phase moves with its whole subtree;
+ * so does a closed Feature or Task that has no Phase. Children never move on their own.
+ */
+function splitDone(groups: readonly Group[]): { active: Group[]; done: Group[] } {
+  const active: Group[] = [];
+  const done: Group[] = [];
+  for (const group of groups) {
+    const open = group.nodes.filter(n => n.state !== 'closed');
+    const closed = group.nodes.filter(n => n.state === 'closed');
+    if (open.length) active.push({ repo: group.repo, nodes: open });
+    if (closed.length) done.push({ repo: group.repo, nodes: closed });
+  }
+  return { active, done };
+}
+
+/** Closed top-level work, collapsed by default. Open when the selected issue is inside, so the details pane never points at a hidden row. */
+function renderDone(groups: readonly Group[], query: BoardQuery, now: number): string {
   const out: string[] = [];
-  for (const group of groupsOf(view.tree)) {
+  let count = 0;
+  let holdsSel = false;
+  for (const group of groups) {
     const rows = flatten(group.nodes, query.status);
     if (rows.length === 0) continue;
-    out.push(`<div class="grp">${REPO}<span class="grp-name" title="${esc(group.repo)}">${esc(shortRepo(group.repo))}</span><span class="meta">${esc(groupSummary(group))}</span></div>`);
+    const tops = rows.filter(row => row.depth === 0).length;
+    count += tops;
+    holdsSel ||= query.sel !== null && rows.some(row => row.node.ref === query.sel);
+    out.push(groupHeader(group.repo, `${tops} closed`));
+    for (const row of rows) out.push(renderRow(row, query, now));
+  }
+  if (count === 0) return '';
+  return [
+    `<details class="done" data-done${holdsSel ? ' open' : ''}>`,
+    `<summary class="done-h"><span class="chev" aria-hidden="true">${CHEVRON}</span><span class="grp-name">Done</span><span class="meta">${count}</span></summary>`,
+    out.join('\n'),
+    '</details>',
+  ].join('\n');
+}
+
+function renderTree(view: BoardView, query: BoardQuery): string {
+  const out: string[] = [];
+  const { active, done } = splitDone(groupsOf(view.tree));
+  for (const group of active) {
+    const rows = flatten(group.nodes, query.status);
+    if (rows.length === 0) continue;
+    out.push(groupHeader(group.repo, groupSummary(group)));
     for (const row of rows) out.push(renderRow(row, query, view.now));
   }
+  const doneHtml = renderDone(done, query, view.now);
+  if (doneHtml) out.push(doneHtml);
   if (out.length === 0) {
     const text = view.issueCount === 0 ? 'No issues synced yet.' : 'Nothing matches these filters.';
     return `<p class="empty">${text}</p>`;
@@ -393,9 +442,9 @@ function renderDetail(view: BoardView, query: BoardQuery): string {
     : 'None';
   return [
     `<aside class="detail" aria-label="Issue details">`,
-    `<div class="d-bar"><a class="back" href="${close}" data-nav>${BACK}Board</a><span class="grow"></span><a class="gh" href="${github}">GitHub</a></div>`,
+    `<div class="d-bar"><a class="back" href="${close}" data-nav>${BACK}Board</a><span class="grow"></span><a class="gh" href="${github}" target="_blank" rel="noopener noreferrer">GitHub</a></div>`,
     '<div class="d-head">',
-    `<div class="d-line">${chip(node)}<span class="num">${esc(shortRepo(node.repo))} #${node.number}</span><span class="grow"></span><a class="d-gh" href="${github}">Open in GitHub</a><a class="chev" href="${close}" data-nav aria-label="Close details">${CLOSE}</a></div>`,
+    `<div class="d-line">${chip(node)}<span class="num">${esc(shortRepo(node.repo))} #${node.number}</span><span class="grow"></span><a class="d-gh" href="${github}" target="_blank" rel="noopener noreferrer">Open in GitHub</a><a class="chev" href="${close}" data-nav aria-label="Close details">${CLOSE}</a></div>`,
     `<h2>${esc(node.title)}</h2>`,
     `<div class="d-line wrap">${badge(status)}${branch ? `<span class="br">${esc(branch)}</span>` : ''}</div>`,
     '</div>',
@@ -407,7 +456,7 @@ function renderDetail(view: BoardView, query: BoardQuery): string {
     `<dt>Sprint</dt><dd>${esc(node.iteration?.title ?? 'None')}</dd>`,
     `<dt>Parent</dt><dd>${parentLine}</dd>`,
     '</dl></div>',
-    `<div class="sec last"><p class="meta">Description, steps and activity live on <a href="${github}">GitHub</a>.</p></div>`,
+    `<div class="sec last"><p class="meta">Description, steps and activity live on <a href="${github}" target="_blank" rel="noopener noreferrer">GitHub</a>.</p></div>`,
     '</aside>',
   ].join('');
 }
