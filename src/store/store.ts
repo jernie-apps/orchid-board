@@ -1062,6 +1062,12 @@ export function underReview(proposal: Pick<Proposal, 'state' | 'nodes'>): boolea
   return approvalPlan(proposal, []).approve.length > 0;
 }
 
+/** The inbox needs Por when at least one draft item is ready for approval. */
+export function needsYou(proposal: Pick<Proposal, 'state' | 'nodes'>): boolean {
+  return (proposal.state === 'pending' || proposal.state === 'approved' || proposal.state === 'done')
+    && approvalPlan(proposal, []).approve.length > 0;
+}
+
 function hashCode(proposalId: string, code: string): string {
   return createHash('sha256').update(`${proposalId}:${code}`).digest('hex');
 }
