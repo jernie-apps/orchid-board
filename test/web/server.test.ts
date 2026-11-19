@@ -296,6 +296,78 @@ test('inbox lists pending proposals and escapes agent text', async t => {
   assert.equal((await get('/inbox/bad%20id')).status, 404);
 });
 
+test('inbox pill and list count proposals that need Por and select the newest one', async t => {
+  const { store, authed } = await fixture(t);
+  const { get } = await authed();
+  const first = { key: 'a', repo: REPO, type: 'Task', title: 'First task' } as const;
+  const second = { ...first, key: 'b', title: 'Second task' };
+  store.createProposal({ nodes: [first] }, new Date('2026-11-18T10:00:00Z'));
+  const actionable = store.createProposal({ nodes: [first, second] }, new Date('2026-11-18T10:01:00Z'));
+  store.setNodeStatus(actionable.id, first.key, 'sent_back');
+  const waiting = store.createProposal({ nodes: [first, second] }, new Date('2026-11-18T10:02:00Z'));
+  store.setNodeStatus(waiting.id, first.key, 'sent_back');
+  store.setNodeStatus(waiting.id, second.key, 'sent_back');
+  const rejected = store.createProposal({ nodes: [first] }, new Date('2026-11-18T10:03:00Z'));
+  store.setProposalState(rejected.id, 'rejected');
+
+  const html = await (await get('/inbox')).text();
+  assert.match(html, /Waiting for you · 2<\/div>/);
+  for (const path of ['/', '/fragment']) {
+    assert.match(await (await get(path)).text(), /Inbox<span class="pill">2<\/span>/);
+  }
+  const list = /<nav class="ib-list"[^>]*>(.*?)<\/nav>/.exec(html)?.[1];
+  assert.ok(list);
+  const [forYou, onAgent, resolved] = list.split(/<div class="ib-sh">(?:Waiting on agent · 1|Resolved)<\/div>/);
+  assert.ok(forYou?.includes(`href="/inbox/${actionable.id}" aria-current="page"`));
+  assert.ok(onAgent);
+  assert.ok(onAgent.includes(`href="/inbox/${waiting.id}"`));
+  assert.ok(onAgent.includes('2 items sent back'));
+  assert.ok(resolved?.includes(`href="/inbox/${rejected.id}"`));
+
+  store.resubmitNodes(waiting.id, [first]);
+  const resubmitted = await (await get('/inbox')).text();
+  assert.match(resubmitted, /Waiting for you · 3<\/div>/);
+  assert.ok(resubmitted.includes(`href="/inbox/${waiting.id}" aria-current="page"`));
+  assert.match(await (await get('/fragment')).text(), /Inbox<span class="pill">3<\/span>/);
+});
+
+test('inbox falls back to the newest proposal under review when Por has nothing to do', async t => {
+  const { store, authed } = await fixture(t);
+  const { get } = await authed();
+  const parent = { key: 'f', repo: REPO, type: 'Feature', title: 'Feature' } as const;
+  const child = { key: 't', parentKey: parent.key, repo: REPO, type: 'Task', title: 'Task' } as const;
+  const input = { nodes: [parent, child] };
+  const older = store.createProposal(input, new Date('2026-11-18T10:00:00Z'));
+  const newest = store.createProposal(input, new Date('2026-11-18T10:01:00Z'));
+  for (const { id } of [older, newest]) store.setNodeStatus(id, parent.key, 'sent_back');
+
+  const html = await (await get('/inbox')).text();
+  assert.match(html, /Waiting for you · 0<\/div>/);
+  assert.match(html, /Waiting on agent · 2<\/div>/);
+  assert.ok(html.includes(`href="/inbox/${newest.id}" aria-current="page"`));
+  assert.ok(html.includes('1 item sent back'));
+  assert.match(await (await get('/fragment')).text(), /<a class="btn inbox-link" href="\/inbox">Inbox<\/a>/);
+});
+
+test('approved proposals whose withheld items were all sent back wait on the agent, not in Resolved', async t => {
+  const { store, authed } = await fixture(t);
+  const { get } = await authed();
+  const first = { key: 'a', repo: REPO, type: 'Task', title: 'First task' } as const;
+  const second = { ...first, key: 'b', title: 'Second task' };
+  const { id } = store.createProposal({ nodes: [first, second] }, new Date('2026-11-18T10:00:00Z'));
+  store.saveApproveCode(id, 'K7Q2', new Date(Date.now() + 600_000));
+  assert.deepEqual(store.approveProposal(id, 'K7Q2', new Date(), { withhold: [second.key] }), { ok: true });
+  store.sendBack(id, second.key, { author: 'Por', body: 'Too big' });
+
+  const html = await (await get('/inbox')).text();
+  assert.match(html, /Waiting for you · 0<\/div>/);
+  const onAgent = html.split('<div class="ib-sh">Waiting on agent · 1</div>')[1]?.split('<div class="ib-sh">Resolved</div>')[0];
+  assert.ok(onAgent);
+  assert.ok(onAgent.includes(`href="/inbox/${id}"`));
+  assert.ok(onAgent.includes('1 item sent back'));
+  assert.ok(!html.includes('<div class="ib-sh">Resolved</div>'));
+});
+
 test('POSTs without the session CSRF token are refused and change nothing', async t => {
   const { store, authed, request } = await fixture(t);
   const id = propose(store).id;

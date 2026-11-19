@@ -1,6 +1,6 @@
 import { issueApproveCode } from '../proposals/approve-code.ts';
 import type { WriteStatus } from '../proposals/writer.ts';
-import { approvalPlan, StoreError, underReview, type Feedback, type Proposal, type ProposalNode, type Store } from '../store/store.ts';
+import { approvalPlan, needsYou, StoreError, underReview, type Feedback, type Proposal, type ProposalNode, type Store } from '../store/store.ts';
 import { ago, badge, csrfField, escapeHtml as esc, LOGO, logoutForm, page, shortRepo, type Status } from './render.ts';
 
 // Web inbox: Por reviews agent proposals, edits titles, drops nodes, approves or sends items back.
@@ -49,7 +49,7 @@ export type InboxOutcome =
 
 export const REVIEWER = 'Por';
 const MAX_NOTE = 4000;
-const EARLIER = 20;
+const RESOLVED_LIMIT = 20;
 const LEVEL = { Phase: 'phase', Feature: 'feature', Task: 'task' } as const;
 
 export function isProposalId(value: string): boolean {
@@ -274,12 +274,27 @@ function sinceText(iso: string, now: number): string {
   return age === 'now' ? 'just now' : `${age} ago`;
 }
 
-function listMeta(proposal: Proposal, now: number): string {
+type ListBucket = 'you' | 'agent' | 'resolved';
+
+/**
+ * Waiting on the agent: nothing for Por to approve, but sent-back items the agent can still resubmit.
+ * That covers approved proposals whose withheld items were sent back, not only pending ones.
+ */
+function waitsOnAgent(proposal: Proposal): boolean {
+  if (proposal.state === 'pending') return true;
+  return proposal.state !== 'rejected' && proposal.nodes.some(node => node.status === 'sent_back');
+}
+
+function listMeta(proposal: Proposal, now: number, bucket: ListBucket): string {
   const age = sinceText(proposal.createdAt, now);
+  if (bucket === 'agent') {
+    const sent = proposal.nodes.filter(node => node.status === 'sent_back').length;
+    return [agentName(proposal), reposOf(proposal), `${plural(sent, 'item')} sent back`, age].join(' · ');
+  }
   if (proposal.state === 'pending') {
     return [agentName(proposal), reposOf(proposal), plural(proposal.nodes.length, 'issue'), age].join(' · ');
   }
-  if (underReview(proposal)) {
+  if (bucket === 'you') {
     const held = approvalPlan(proposal, []).approve.length;
     return [agentName(proposal), `${plural(held, 'item')} withheld`, age].join(' · ');
   }
@@ -289,19 +304,29 @@ function listMeta(proposal: Proposal, now: number): string {
 }
 
 function renderList(view: InboxView): string {
-  const pending = view.proposals.filter(p => underReview(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const earlier = view.proposals.filter(p => !underReview(p))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, EARLIER);
-  const item = (p: Proposal) => {
+  const waitingForYou: Proposal[] = [];
+  const waitingOnAgent: Proposal[] = [];
+  const resolved: Proposal[] = [];
+  for (const proposal of view.proposals) {
+    if (needsYou(proposal)) waitingForYou.push(proposal);
+    else if (waitsOnAgent(proposal)) waitingOnAgent.push(proposal);
+    else resolved.push(proposal);
+  }
+  const newestFirst = (a: Proposal, b: Proposal) => b.createdAt.localeCompare(a.createdAt);
+  waitingForYou.sort(newestFirst);
+  waitingOnAgent.sort(newestFirst);
+  const recentResolved = resolved.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, RESOLVED_LIMIT);
+  const item = (p: Proposal, bucket: ListBucket) => {
     const on = view.selected?.id === p.id;
-    return `<a class="prop${on ? ' on' : ''}${underReview(p) ? ' pending' : ''}" href="${esc(proposalHref(p.id))}"${on ? ' aria-current="page"' : ''}>`
-      + `<span class="prop-t">${esc(proposalTitle(p))}</span><span class="meta">${esc(listMeta(p, view.now))}</span></a>`;
+    return `<a class="prop${on ? ' on' : ''}${bucket === 'you' ? ' pending' : ''}" href="${esc(proposalHref(p.id))}"${on ? ' aria-current="page"' : ''}>`
+      + `<span class="prop-t">${esc(proposalTitle(p))}</span><span class="meta">${esc(listMeta(p, view.now, bucket))}</span></a>`;
   };
   return [
     '<nav class="ib-list" aria-label="Proposals">',
-    `<div class="ib-sh">Waiting for you · ${pending.length}</div>`,
-    pending.length ? pending.map(item).join('') : '<p class="meta ib-none">Nothing waiting.</p>',
-    earlier.length ? `<div class="ib-sh">Earlier</div>${earlier.map(item).join('')}` : '',
+    `<div class="ib-sh">Waiting for you · ${waitingForYou.length}</div>`,
+    waitingForYou.length ? waitingForYou.map(p => item(p, 'you')).join('') : '<p class="meta ib-none">Nothing waiting.</p>',
+    waitingOnAgent.length ? `<div class="ib-sh">Waiting on agent · ${waitingOnAgent.length}</div>${waitingOnAgent.map(p => item(p, 'agent')).join('')}` : '',
+    recentResolved.length ? `<div class="ib-sh">Resolved</div>${recentResolved.map(p => item(p, 'resolved')).join('')}` : '',
     '</nav>',
   ].join('');
 }
