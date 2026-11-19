@@ -16,13 +16,14 @@
     // All autosaves run one after another; page submits and navigation wait for them.
     let saving = Promise.resolve();
     const pending = new Map();
-    const post = (url, body, status, fail) => {
+    const post = (url, body, status, fail, afterSave) => {
       saving = saving.then(async () => {
         if (status) status.textContent = 'Saving…';
         try {
-          const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', redirect: 'manual' });
+          const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', redirect: afterSave ? 'follow' : 'manual' });
           const ok = res.type === 'opaqueredirect' || res.ok;
           if (status) status.textContent = ok ? 'Saved' : fail;
+          if (res.ok && afterSave) await afterSave(res);
         } catch {
           if (status) status.textContent = 'Not saved. Check your connection.';
         }
@@ -125,10 +126,19 @@
       const status = details.querySelector('[data-dsaved]');
       const steps = details.querySelector('[data-steps]');
       const key = details.querySelector('input[name="key"]').value;
+      const description = details.querySelector('[data-description]');
+      const refreshDescription = async res => {
+        // The details POST redirects to the server-rendered pane. Keep the open editor and its input.
+        const tpl = document.createElement('template');
+        tpl.innerHTML = await res.text().catch(() => '');
+        const next = tpl.content.querySelector('[data-description]');
+        if (!next) status.textContent = 'Saved. Reload to refresh the description.';
+        else if (description.innerHTML !== next.innerHTML) description.replaceChildren(...next.childNodes);
+      };
       const saveDetails = () => {
         const body = fields(details, name => name === 'op');
         body.set('op', 'details');
-        return post(details.action, body, status, 'Not saved. Check the fields.');
+        return post(details.action, body, status, 'Not saved. Check the fields.', refreshDescription);
       };
       // The row's "Comment" tag follows the draft comment as Por types.
       const tag = () => {
@@ -187,7 +197,7 @@
         later('details', saveDetails, 0);
       });
       // Closing the pane or picking another item waits for the last edit to save.
-      for (const link of document.querySelectorAll('.ib-detail a[href]')) {
+      for (const link of document.querySelectorAll('.dt-bar a[href], .dt-close')) {
         link.addEventListener('click', event => {
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
           event.preventDefault();

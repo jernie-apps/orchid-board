@@ -626,3 +626,41 @@ test('sending back the last withheld items ends the review and still records the
   assert.ok((await (await get('/inbox')).text()).includes('Waiting for you · 0'));
   assert.deepEqual(kicked, [id]);
 });
+
+test('editable inbox descriptions display Markdown and keep raw source in the collapsed editor', async t => {
+  const { store, authed } = await fixture(t);
+  const body = '\n## Notes\nUse **tokens** and `</textarea>`.\n\n- [x] Ready';
+  const id = store.createProposal({ agent: 'Claude', nodes: [
+    { key: 't1', repo: REPO, type: 'Task', title: 'dark-theme', body, branch: 'feature/board-polish/dark-theme' },
+  ] }).id;
+  const { csrf, post, get } = await authed();
+  const route = `/inbox/${id}`;
+  const selected = `${route}?sel=t1`;
+
+  const html = await (await get(selected)).text();
+  const form = /<form[^>]* data-details>([^]*?)<\/form>/.exec(html)?.[1];
+  assert.ok(form);
+  assert.ok(form.includes('<div class="dt-markdown" data-description><h2>Notes</h2><p>Use <strong>tokens</strong> and <code>&#60;/textarea&#62;</code>.</p>'));
+  const editor = /<details class="dt-edit"><summary>Edit<\/summary><textarea[^>]* name="body"[^>]*>([^]*?)<\/textarea><\/details>/.exec(form);
+  // The first newline is stripped by the HTML parser. The second belongs to the source.
+  assert.equal(editor?.[1], '\n\n## Notes\nUse **tokens** and `&#60;/textarea&#62;`.\n\n- [x] Ready');
+
+  const changed = '*Saved* description';
+  const saved = await post(route, [['csrf', csrf], ['op', 'details'], ['key', 't1'], ['body', changed]]);
+  assert.equal(saved.status, 303);
+  assert.equal(saved.headers.get('location'), selected);
+  const refreshed = await (await get(selected)).text();
+  assert.match(refreshed, /data-description><p><em>Saved<\/em> description<\/p><\/div>/);
+  assert.equal(store.getProposal(id)?.nodes.find(node => node.key === 't1')?.body, changed);
+});
+
+test('read-only inbox descriptions display Markdown with raw HTML escaped', async t => {
+  const { store, authed } = await fixture(t);
+  const id = propose(store).id;
+  store.updateProposalNodeDetails(id, 't1', { body: '**Pending**\n\n> <script>alert(1)</script>' });
+  const { csrf, post, get } = await authed();
+  assert.equal((await post(`/inbox/${id}`, [['csrf', csrf], ['op', 'approve']])).status, 303);
+  const html = await (await get(`/inbox/${id}?sel=t1`)).text();
+  assert.match(html, /data-description><p><strong>Pending<\/strong><\/p><blockquote><p>&#60;script&#62;alert\(1\)&#60;\/script&#62;<\/p><\/blockquote><\/div>/);
+  assert.doesNotMatch(html, /<script>alert|name="body"|data-details/);
+});
