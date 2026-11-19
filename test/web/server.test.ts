@@ -349,6 +349,25 @@ test('inbox falls back to the newest proposal under review when Por has nothing 
   assert.match(await (await get('/fragment')).text(), /<a class="btn inbox-link" href="\/inbox">Inbox<\/a>/);
 });
 
+test('approved proposals whose withheld items were all sent back wait on the agent, not in Resolved', async t => {
+  const { store, authed } = await fixture(t);
+  const { get } = await authed();
+  const first = { key: 'a', repo: REPO, type: 'Task', title: 'First task' } as const;
+  const second = { ...first, key: 'b', title: 'Second task' };
+  const { id } = store.createProposal({ nodes: [first, second] }, new Date('2026-11-18T10:00:00Z'));
+  store.saveApproveCode(id, 'K7Q2', new Date(Date.now() + 600_000));
+  assert.deepEqual(store.approveProposal(id, 'K7Q2', new Date(), { withhold: [second.key] }), { ok: true });
+  store.sendBack(id, second.key, { author: 'Por', body: 'Too big' });
+
+  const html = await (await get('/inbox')).text();
+  assert.match(html, /Waiting for you · 0<\/div>/);
+  const onAgent = html.split('<div class="ib-sh">Waiting on agent · 1</div>')[1]?.split('<div class="ib-sh">Resolved</div>')[0];
+  assert.ok(onAgent);
+  assert.ok(onAgent.includes(`href="/inbox/${id}"`));
+  assert.ok(onAgent.includes('1 item sent back'));
+  assert.ok(!html.includes('<div class="ib-sh">Resolved</div>'));
+});
+
 test('POSTs without the session CSRF token are refused and change nothing', async t => {
   const { store, authed, request } = await fixture(t);
   const id = propose(store).id;
