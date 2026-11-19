@@ -1,6 +1,7 @@
 import { issueApproveCode } from '../proposals/approve-code.ts';
 import type { WriteStatus } from '../proposals/writer.ts';
 import { approvalPlan, needsYou, StoreError, underReview, type Feedback, type Proposal, type ProposalNode, type Store } from '../store/store.ts';
+import { renderMarkdown } from './markdown.ts';
 import { ago, badge, csrfField, escapeHtml as esc, LOGO, logoutForm, page, shortRepo, type Status } from './render.ts';
 
 // Web inbox: Por reviews agent proposals, edits titles, drops nodes, approves or sends items back.
@@ -596,6 +597,7 @@ function renderDetail(view: InboxView, proposal: Proposal): string {
   const kids = proposal.nodes.filter(n => n.parentKey === node.key);
   const base = node.baseBranch ?? derivedBase(proposal, node);
   const steps = node.steps ?? [];
+  const description = `<div class="dt-markdown" data-description>${renderMarkdown(node.body) || '<p class="meta">No description.</p>'}</div>`;
   const head = [
     `<div class="dt-bar"><a class="back" href="${close}">${BACK_ICON}Proposal</a></div>`,
     '<div class="dt-head">',
@@ -613,7 +615,7 @@ function renderDetail(view: InboxView, proposal: Proposal): string {
     const comments = view.feedback.filter(item => item.nodeKey === node.key);
     return [
       '<aside class="ib-detail" aria-label="Item details">', head,
-      `<div class="sec"><div class="sh">Description</div><p class="dt-text">${node.body.trim() ? esc(node.body) : 'No description.'}</p></div>`,
+      `<div class="sec"><div class="sh">Description</div>${description}</div>`,
       steps.length ? `<div class="sec"><div class="sh">Steps</div><ul class="dt-steps">${steps.map(step => `<li>${esc(step)}</li>`).join('')}</ul></div>` : '',
       kidsSec,
       '<div class="sec"><div class="sh">Fields</div><dl class="kv">',
@@ -628,6 +630,8 @@ function renderDetail(view: InboxView, proposal: Proposal): string {
       '</aside>',
     ].join('');
   }
+  // HTML strips one newline immediately after <textarea>. Preserve any leading newline in the source.
+  const source = /^[\r\n]/.test(node.body) ? `\n${node.body}` : node.body;
   const sprintValues = [...view.sprints];
   if (node.iteration && !sprintValues.includes(node.iteration)) sprintValues.unshift(node.iteration);
   const stepRow = (step: string, i: number) => [
@@ -643,7 +647,8 @@ function renderDetail(view: InboxView, proposal: Proposal): string {
     `<input type="hidden" name="key" value="${esc(node.key)}"><input type="hidden" name="sel" value="${esc(node.key)}">`,
     // First submit button in the form, so Enter in a field saves instead of removing a step.
     '<div class="dt-save"><button class="btn save" type="submit" name="op" value="details">Save details</button><span class="meta" data-dsaved aria-live="polite"></span></div>',
-    `<div class="sec"><label class="sh" for="d-about">Description</label><textarea id="d-about" class="fld" name="body" rows="4" maxlength="20000">${esc(node.body)}</textarea></div>`,
+    `<div class="sec"><div class="sh">Description</div>${description}<details class="dt-edit"><summary>Edit</summary>`,
+    `<textarea id="d-about" class="fld" name="body" rows="4" maxlength="20000" aria-label="Description">${esc(source)}</textarea></details></div>`,
     node.type === 'Task'
       ? '<div class="sec"><div class="sh">Steps (checklist in the issue)</div><input type="hidden" name="steps" value="1">'
         + `<div data-steps>${steps.map(stepRow).join('')}</div>`
