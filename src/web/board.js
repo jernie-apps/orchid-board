@@ -3,6 +3,7 @@
 (() => {
   'use strict';
   const KEY = 'orchid.board.closed';
+  const DONE_KEY = 'orchid.board.doneOpen';
   const root = document.documentElement;
   root.classList.add('js');
 
@@ -16,13 +17,14 @@
     // All autosaves run one after another; page submits and navigation wait for them.
     let saving = Promise.resolve();
     const pending = new Map();
-    const post = (url, body, status, fail) => {
+    const post = (url, body, status, fail, afterSave) => {
       saving = saving.then(async () => {
         if (status) status.textContent = 'Saving…';
         try {
-          const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', redirect: 'manual' });
+          const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', redirect: afterSave ? 'follow' : 'manual' });
           const ok = res.type === 'opaqueredirect' || res.ok;
           if (status) status.textContent = ok ? 'Saved' : fail;
+          if (res.ok && afterSave) await afterSave(res);
         } catch {
           if (status) status.textContent = 'Not saved. Check your connection.';
         }
@@ -125,10 +127,19 @@
       const status = details.querySelector('[data-dsaved]');
       const steps = details.querySelector('[data-steps]');
       const key = details.querySelector('input[name="key"]').value;
+      const description = details.querySelector('[data-description]');
+      const refreshDescription = async res => {
+        // The details POST redirects to the server-rendered pane. Keep the open editor and its input.
+        const tpl = document.createElement('template');
+        tpl.innerHTML = await res.text().catch(() => '');
+        const next = tpl.content.querySelector('[data-description]');
+        if (!next) status.textContent = 'Saved. Reload to refresh the description.';
+        else if (description.innerHTML !== next.innerHTML) description.replaceChildren(...next.childNodes);
+      };
       const saveDetails = () => {
         const body = fields(details, name => name === 'op');
         body.set('op', 'details');
-        return post(details.action, body, status, 'Not saved. Check the fields.');
+        return post(details.action, body, status, 'Not saved. Check the fields.', refreshDescription);
       };
       // The row's "Comment" tag follows the draft comment as Por types.
       const tag = () => {
@@ -187,7 +198,7 @@
         later('details', saveDetails, 0);
       });
       // Closing the pane or picking another item waits for the last edit to save.
-      for (const link of document.querySelectorAll('.ib-detail a[href]')) {
+      for (const link of document.querySelectorAll('.dt-bar a[href], .dt-close')) {
         link.addEventListener('click', event => {
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
           event.preventDefault();
@@ -278,7 +289,28 @@
     }
   };
 
+  // The Done section defaults to closed, the inverse of the per-row set above. Only Por's clicks are stored.
+  let doneOpen = false;
+  try {
+    doneOpen = localStorage.getItem(DONE_KEY) === '1';
+  } catch {
+    doneOpen = false;
+  }
+  const saveDone = () => {
+    try {
+      localStorage.setItem(DONE_KEY, doneOpen ? '1' : '0');
+    } catch {
+      // Storage blocked: the Done section state lasts for this page only.
+    }
+  };
+
   const app = () => document.getElementById('app');
+
+  // Server renders it closed (or open when the selected issue is inside); a stored "open" wins over closed.
+  function applyDone() {
+    const done = document.querySelector('details[data-done]');
+    if (done && doneOpen) done.open = true;
+  }
 
   // Status filters show every match, so collapse applies only to the unfiltered view.
   function applyCollapse() {
@@ -359,6 +391,7 @@
     current.replaceWith(next);
     if (push !== undefined) history[push ? 'pushState' : 'replaceState'](null, '', search ? `/${search}` : '/');
     applyCollapse();
+    applyDone();
     updateAges();
     const phoneDetail = next.classList.contains('has-detail') && window.matchMedia('(max-width: 720px)').matches;
     window.scrollTo(0, push && phoneDetail ? 0 : scroll);
@@ -378,6 +411,13 @@
       else closed.add(ref);
       save();
       applyCollapse();
+      return;
+    }
+    const summary = target && target.closest('details[data-done] > summary');
+    if (summary) {
+      // Click runs before the details element toggles, so the new state is the opposite of the current one.
+      doneOpen = !summary.parentElement.open;
+      saveDone();
       return;
     }
     const link = target && target.closest('a[data-nav]');
@@ -437,6 +477,7 @@
   }
 
   applyCollapse();
+  applyDone();
   updateAges();
   setInterval(updateAges, 5000);
 })();

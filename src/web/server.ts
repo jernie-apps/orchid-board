@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Secret } from '../secrets.ts';
-import { underReview, type Store } from '../store/store.ts';
+import { needsYou, underReview, type Store } from '../store/store.ts';
 import type { SyncEvents } from '../sync/poller.ts';
 import {
   applyProposalPost, applySendBack, isProposalId, renderInbox, selParam, type InboxOutcome, type InboxState, type InboxWriter,
@@ -174,7 +174,7 @@ export function buildView(
     ...(query.repo ? { repo: query.repo } : {}),
     ...(query.sprint ? { iteration: query.sprint } : {}),
   });
-  const inboxCount = store.listProposals().filter(underReview).length;
+  const inboxCount = store.listProposals().filter(needsYou).length;
   return { tree, repos, sprints, issueCount: issues.length, lastSyncAt: sync.lastSyncAt, mcpPort, now, inboxCount, ...(csrf ? { csrf } : {}) };
 }
 
@@ -313,9 +313,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       if (proposalId !== null && !isProposalId(proposalId)) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
       const showInbox = (status: number, state: InboxState = {}) => {
         const proposals = store.listProposals();
-        const selected = proposalId === null
-          ? proposals.filter(p => underReview(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
-          : store.getProposal(proposalId);
+        let selected = proposalId === null ? null : store.getProposal(proposalId);
+        if (proposalId === null) {
+          const newestFirst = proposals.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+          selected = newestFirst.find(needsYou) ?? newestFirst.find(underReview) ?? null;
+        }
         if (!selected && proposalId !== null) return send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
         const sprints = [...new Set(store.listIssues().flatMap(issue => (issue.iteration ? [issue.iteration.title] : [])))].sort();
         const html = renderInbox({
