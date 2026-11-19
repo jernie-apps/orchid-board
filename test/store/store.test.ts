@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { openDb } from '../../src/store/db.ts';
-import { ClaimConflictError, Store, StoreError, type IssueInput, type TreeNode } from '../../src/store/store.ts';
+import { ClaimConflictError, needsYou, Store, StoreError, underReview, type IssueInput, type TreeNode } from '../../src/store/store.ts';
 
 const T0 = new Date('2026-11-18T10:00:00.000Z');
 const MIN = 60_000;
@@ -290,6 +290,50 @@ describe('proposals', () => {
     assert.equal(f.issueNumber, 30);
     assert.equal(f.issueNodeId, 'I_30');
     assert.equal(store.getProposal(id)!.state, 'approved');
+  });
+});
+
+describe('needsYou', () => {
+  const first = { key: 'a', repo: REPO, type: 'Task', title: 'First task' } as const;
+  const second = { ...first, key: 'b', title: 'Second task' };
+
+  it('counts pending proposals until all items are sent back and counts them again after resubmission', () => {
+    const store = newStore();
+    const { id } = store.createProposal({ nodes: [first, second] });
+    const feedback = { author: 'por', body: 'Split this' };
+    store.sendBack(id, first.key, feedback);
+    assert.equal(needsYou(store.getProposal(id)!), true);
+
+    store.sendBack(id, second.key, feedback);
+    const waiting = store.getProposal(id)!;
+    assert.equal(needsYou(waiting), false);
+    assert.equal(underReview(waiting), true);
+
+    assert.equal(needsYou(store.resubmitNodes(id, [first])), true);
+  });
+
+  it('excludes draft descendants of a sent-back parent', () => {
+    const store = newStore();
+    const parent = { key: 'p', repo: REPO, type: 'Phase', title: 'Phase' } as const;
+    const feature = { key: 'f', parentKey: parent.key, repo: REPO, type: 'Feature', title: 'Feature' } as const;
+    const { id } = store.createProposal({ nodes: [parent, feature, { ...first, parentKey: feature.key }] });
+    store.sendBack(id, parent.key, { author: 'por', body: 'Revise the scope' });
+    assert.equal(needsYou(store.getProposal(id)!), false);
+  });
+
+  it('counts withheld drafts after approval and after writing, and excludes rejected proposals', () => {
+    const store = newStore();
+    const { id } = store.createProposal({ nodes: [first, second] });
+    store.saveApproveCode(id, 'K7Q2', at(10));
+    assert.deepEqual(store.approveProposal(id, 'K7Q2', at(1), { withhold: [second.key] }), { ok: true });
+    assert.equal(needsYou(store.getProposal(id)!), true);
+
+    store.recordCreatedIssue(id, first.key, { number: 30, nodeId: 'I_30' });
+    store.setProposalState(id, 'done', at(2));
+    assert.equal(needsYou(store.getProposal(id)!), true);
+
+    store.setProposalState(id, 'rejected', at(3));
+    assert.equal(needsYou(store.getProposal(id)!), false);
   });
 });
 

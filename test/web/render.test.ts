@@ -172,3 +172,93 @@ test('boardHref round-trips through parseQuery and drops defaults', () => {
   assert.equal(boardHref(ALL), '/');
   assert.equal(boardHref(query, { repo: null, sprint: null, status: 'all', sel: null }), '/');
 });
+
+/**
+ * Done section fixture:
+ * - closed Phase #1 → closed Feature #2 → open Task #3 (moves with its Phase)
+ * - open Phase #10 → closed Feature #11 → closed Task #12 (stays: the Phase is open)
+ * - closed no-phase Feature #20 → closed Task #21, closed no-phase Task #30 (both move)
+ * - open no-phase Feature #40 (stays)
+ * - closed no-phase Feature in another repo, IOS #500 (moves; repo filter hides it)
+ */
+function doneStore(): Store {
+  const store = openStore(':memory:', { now: () => new Date(NOW) });
+  store.upsertIssues([
+    issue(`${REPO}#1`, { type: 'Phase', title: 'Closed phase', state: 'closed', iteration: null }),
+    issue(`${REPO}#2`, { type: 'Feature', title: 'Closed feature', state: 'closed', parent: `${REPO}#1` }),
+    issue(`${REPO}#3`, { title: 'Leftover open task', parent: `${REPO}#2` }),
+    issue(`${REPO}#10`, { type: 'Phase', title: 'Open phase', iteration: null }),
+    issue(`${REPO}#11`, { type: 'Feature', title: 'Finished feature', state: 'closed', parent: `${REPO}#10` }),
+    issue(`${REPO}#12`, { title: 'Finished task', state: 'closed', parent: `${REPO}#11` }),
+    issue(`${REPO}#20`, { type: 'Feature', title: 'Closed loose feature', state: 'closed' }),
+    issue(`${REPO}#21`, { title: 'Closed loose feature task', state: 'closed', parent: `${REPO}#20` }),
+    issue(`${REPO}#30`, { title: 'Closed loose task', state: 'closed' }),
+    issue(`${REPO}#40`, { type: 'Feature', title: 'Open loose feature' }),
+    issue(`${IOS}#500`, { type: 'Feature', title: 'Closed iOS feature', state: 'closed' }),
+  ]);
+  return store;
+}
+
+/** [main tree, Done section] of a rendered board. */
+function split(html: string): [string, string] {
+  const at = html.indexOf('<details class="done"');
+  if (at === -1) return [html, ''];
+  const end = html.indexOf('</details>', at);
+  return [html.slice(0, at) + html.slice(end), html.slice(at, end)];
+}
+
+const row = (ref: string) => `data-ref="${ref}"`;
+
+test('closed top-level issues move to the Done section with their subtree', () => {
+  const [main, done] = split(renderApp(view(doneStore(), ALL), ALL));
+  for (const ref of [`${REPO}#1`, `${REPO}#2`, `${REPO}#3`, `${REPO}#20`, `${REPO}#21`, `${REPO}#30`, `${IOS}#500`]) {
+    assert.ok(done.includes(row(ref)), `${ref} in Done`);
+    assert.ok(!main.includes(row(ref)), `${ref} not in main`);
+  }
+  // An open Phase stays even when all its work is closed, and children never move on their own.
+  for (const ref of [`${REPO}#10`, `${REPO}#11`, `${REPO}#12`, `${REPO}#40`]) {
+    assert.ok(main.includes(row(ref)), `${ref} in main`);
+    assert.ok(!done.includes(row(ref)), `${ref} not in Done`);
+  }
+  // Four closed top-level rows: #1, #20, #30 and iOS #500.
+  assert.match(done, /<span class="grp-name">Done<\/span><span class="meta">4<\/span>/);
+  assert.ok(done.includes('<span class="meta">3 closed</span>'));
+  assert.ok(done.includes('<span class="meta">1 closed</span>'));
+});
+
+test('repo group summary counts active rows only; a repo with only closed rows leaves the main tree', () => {
+  const [main] = split(renderApp(view(doneStore(), ALL), ALL));
+  // Active orchid-board rows: open Phase #10 (task #12 done) and loose Feature #40 (no tasks).
+  assert.ok(main.includes('<span class="meta">1 of 1 tasks done</span>'));
+  assert.ok(!main.includes(`title="${IOS}"`));
+});
+
+test('the Done section is closed by default and open when the selected issue is inside it', () => {
+  const closed = renderApp(view(doneStore(), ALL), ALL);
+  assert.ok(closed.includes('<details class="done" data-done>'));
+  const inside = renderApp(view(doneStore(), ALL), { ...ALL, sel: `${REPO}#3` });
+  assert.ok(inside.includes('<details class="done" data-done open>'));
+  assert.ok(inside.includes('aria-label="Issue details"'));
+  const outside = renderApp(view(doneStore(), ALL), { ...ALL, sel: `${REPO}#40` });
+  assert.ok(outside.includes('<details class="done" data-done>'));
+});
+
+test('filters apply to the Done section', () => {
+  const store = doneStore();
+  const repoOnly: BoardQuery = { ...ALL, repo: REPO };
+  const [, done] = split(renderApp(view(store, repoOnly), repoOnly));
+  assert.ok(done.includes(row(`${REPO}#1`)));
+  assert.ok(!done.includes(row(`${IOS}#500`)));
+  // The open leftover Task under the closed Phase is the only "Open" row; no status filter matches it.
+  const failed = renderApp(view(store, ALL), { ...ALL, status: 'failed' });
+  assert.ok(!failed.includes('<details class="done"'));
+  store.upsertPr(pr(`${REPO}#90`, [`${REPO}#3`], 'open', false, 'fail'));
+  const [, failedDone] = split(renderApp(view(store, ALL), { ...ALL, status: 'failed' }));
+  assert.ok(failedDone.includes(row(`${REPO}#3`)));
+  assert.match(failedDone, /<span class="meta">1<\/span><\/summary>/);
+});
+
+test('no Done section when nothing top-level is closed', () => {
+  const html = renderApp(view(fixtureStore(), ALL), ALL);
+  assert.ok(!html.includes('<details'));
+});
