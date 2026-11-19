@@ -531,7 +531,7 @@ test('approved proposals show GitHub write progress and errors', async t => {
   assert.ok(html.includes('&#60;b&#62;x&#60;/b&#62;'));
   assert.ok(html.includes('Retries automatically at'));
   assert.ok(html.includes('Created #41'));
-  assert.ok(html.includes(`href="https://github.com/${REPO}/issues/41"`));
+  assert.ok(html.includes(`href="https://github.com/${REPO}/issues/41" target="_blank" rel="noopener noreferrer"`));
   assert.ok(html.includes('Approved · writing'));
 });
 

@@ -359,7 +359,7 @@ function nodeStatus(node: ProposalNode, dropped: boolean): Status | null {
 function issueLink(node: ProposalNode): string {
   if (node.issueNumber === null) return '';
   const url = `https://github.com/${node.repo}/issues/${node.issueNumber}`;
-  return `<a class="mono" href="${esc(url)}">${esc(shortRepo(node.repo))}#${node.issueNumber}</a>`;
+  return `<a class="mono" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(shortRepo(node.repo))}#${node.issueNumber}</a>`;
 }
 
 function renderRows(view: InboxView, proposal: Proposal, editable: boolean): string {

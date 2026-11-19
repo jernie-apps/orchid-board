@@ -442,9 +442,9 @@ function renderDetail(view: BoardView, query: BoardQuery): string {
     : 'None';
   return [
     `<aside class="detail" aria-label="Issue details">`,
-    `<div class="d-bar"><a class="back" href="${close}" data-nav>${BACK}Board</a><span class="grow"></span><a class="gh" href="${github}">GitHub</a></div>`,
+    `<div class="d-bar"><a class="back" href="${close}" data-nav>${BACK}Board</a><span class="grow"></span><a class="gh" href="${github}" target="_blank" rel="noopener noreferrer">GitHub</a></div>`,
     '<div class="d-head">',
-    `<div class="d-line">${chip(node)}<span class="num">${esc(shortRepo(node.repo))} #${node.number}</span><span class="grow"></span><a class="d-gh" href="${github}">Open in GitHub</a><a class="chev" href="${close}" data-nav aria-label="Close details">${CLOSE}</a></div>`,
+    `<div class="d-line">${chip(node)}<span class="num">${esc(shortRepo(node.repo))} #${node.number}</span><span class="grow"></span><a class="d-gh" href="${github}" target="_blank" rel="noopener noreferrer">Open in GitHub</a><a class="chev" href="${close}" data-nav aria-label="Close details">${CLOSE}</a></div>`,
     `<h2>${esc(node.title)}</h2>`,
     `<div class="d-line wrap">${badge(status)}${branch ? `<span class="br">${esc(branch)}</span>` : ''}</div>`,
     '</div>',
@@ -456,7 +456,7 @@ function renderDetail(view: BoardView, query: BoardQuery): string {
     `<dt>Sprint</dt><dd>${esc(node.iteration?.title ?? 'None')}</dd>`,
     `<dt>Parent</dt><dd>${parentLine}</dd>`,
     '</dl></div>',
-    `<div class="sec last"><p class="meta">Description, steps and activity live on <a href="${github}">GitHub</a>.</p></div>`,
+    `<div class="sec last"><p class="meta">Description, steps and activity live on <a href="${github}" target="_blank" rel="noopener noreferrer">GitHub</a>.</p></div>`,
     '</aside>',
   ].join('');
 }
