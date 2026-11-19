@@ -262,3 +262,12 @@ test('no Done section when nothing top-level is closed', () => {
   const html = renderApp(view(fixtureStore(), ALL), ALL);
   assert.ok(!html.includes('<details'));
 });
+
+test('GitHub pull request and issue links open in a new tab without opener access', () => {
+  const html = renderApp(view(fixtureStore(), ALL), { ...ALL, sel: `${REPO}#8` });
+  const prs = html.match(/<a class="mono pr"[^>]*>/g) ?? [];
+  assert.ok(prs.length >= 2, 'board row and details pane both link the PR');
+  const issues = html.match(/<a [^>]*href="https:\/\/github\.com\/[^"]*\/issues\/8"[^>]*>/g) ?? [];
+  assert.equal(issues.length, 3, 'GitHub, Open in GitHub and the description note');
+  for (const link of [...prs, ...issues]) assert.ok(link.includes(' target="_blank" rel="noopener noreferrer"'), link);
+});
