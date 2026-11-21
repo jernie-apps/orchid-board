@@ -4,6 +4,8 @@ A self-hosted project board for one developer and their AI coding agents.
 
 GitHub issues stay the source of truth. Orchid Board mirrors them into a local SQLite cache, shows them as a Phase → Feature → Task tree in a web board that works on desktop and phone, and exposes the same tree to agents over MCP. Agents claim tasks, propose new work, and wait for a human to approve it in the web inbox before anything is written back to GitHub.
 
+![Orchid Board: Phase, Feature and Task tree with PR and CI status](docs/img/board.png)
+
 ## What it does
 
 - **Board.** Live tree of Phases, Features and Tasks across your repos, with PR links, status badges, filters and a collapsed Done section. Updates over Server-Sent Events.
