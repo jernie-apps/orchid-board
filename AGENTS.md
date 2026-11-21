@@ -1,16 +1,15 @@
 # Orchid Board: agent rules
 
 Self-hosted task board over GitHub issues (Phase → Feature → Task) plus an MCP server for T3 agents.
-Runs on Por's Mac at `https://orchid.jernie.app`, home network only.
-Tracking: Phase issue #1 in `companie-apps/orchid-board`. Read your Task issue (`gh issue view <n>`) before starting.
+Runs on one Mac on a home network.
+Tracking: Phase issue #1 in `jernie-apps/orchid-board`. Read your Task issue (`gh issue view <n>`) before starting.
 
 ## Hard rules
 
 - **≤10 changed files per PR**, tests and `package-lock.json` included.
-- **Runtime deps:** only `@modelcontextprotocol/sdk` and `zod`. Anything else needs Por's OK. Dev deps: `typescript`, `@types/node` only.
+- **Runtime deps:** only `@modelcontextprotocol/sdk` and `zod`. Anything else needs the maintainer's OK. Dev deps: `typescript`, `@types/node` only.
 - **Secrets** live in `~/.orchid/board/` files (`github.token`, `mcp.token`, `web.passphrase`). Read them only via `src/secrets.ts`. Never log, commit, echo or put them in errors. Keep values wrapped in `Secret` until the point of use.
 - **GitHub is truth.** The local DB is cache + claims + proposals + feedback only.
-- **Stem lifts:** copy from `companie-agents/packages/stem/src` (local checkout: `/Users/poranaiiii/Desktop/Work/repo/Companie/orchid/companie-agents`). Never import or depend on it.
 - **Never bypass git hooks** (no `--no-verify`).
 - No network in tests. Use fixtures and fake `fetch`.
 

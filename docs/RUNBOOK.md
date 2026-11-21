@@ -18,7 +18,7 @@ The board listens on `127.0.0.1:4310` by default. The Caddy LaunchAgent terminat
 
    ```json
    {
-     "repos": ["companie-apps/orchid-board"],
+     "repos": ["owner/repo"],
      "port": 4310,
      "mcpPort": 4311,
      "pollSeconds": 60
